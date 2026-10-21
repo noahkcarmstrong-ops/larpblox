@@ -233,6 +233,9 @@ return function(player,onStatus,readAsset,managedRespawn)
                     assert(part and part:IsA("BasePart"),"This character does not use a standard R15 body.")
                     copies[name]=bodyClone(part)
                 end
+                local root=ctx.character:FindFirstChild("HumanoidRootPart")
+                assert(root and root:IsA("BasePart"),"This character has no R15 root part.")
+                copies.HumanoidRootPart=bodyClone(root)
             end)
             if not ok then for _,part in pairs(copies) do part:Destroy() end;error(message) end
             snapshot.parts=copies
@@ -409,7 +412,12 @@ return function(player,onStatus,readAsset,managedRespawn)
         end
     end
     local function replaceParts(ctx,parts,names)
-        names=names or r15
+        if not names then
+            names=table.clone(r15)
+            -- A generated rig's hip height assumes its root size and root
+            -- attachment offset. Keep the live root, but fit it with the body.
+            if parts.HumanoidRootPart then table.insert(names,"HumanoidRootPart") end
+        end
         for _,name in ipairs(names) do
             local target=ctx.character:FindFirstChild(name)
             assert(parts[name] and parts[name]:IsA("BasePart") and target and target:IsA("BasePart"),"This package does not contain the selected R15 body part.")
@@ -935,6 +943,7 @@ return function(player,onStatus,readAsset,managedRespawn)
             else
                 local generated={}
                 for _,name in ipairs(r15)do generated[name]=template:FindFirstChild(name)end
+                generated.HumanoidRootPart=template:FindFirstChild("HumanoidRootPart")
                 replaceParts(ctx,generated)
                 local humanoid=template:FindFirstChildOfClass("Humanoid")
                 if humanoid then ctx.humanoid.HipHeight=humanoid.HipHeight end
@@ -978,6 +987,7 @@ return function(player,onStatus,readAsset,managedRespawn)
                     local part=template:FindFirstChild(name)
                     if part and part:IsA("BasePart") then parts[name]=part end
                 end
+                parts.HumanoidRootPart=template:FindFirstChild("HumanoidRootPart")
                 capture(ctx,true)
                 replaceParts(ctx,parts)
                 local generatedHumanoid=template:FindFirstChildOfClass("Humanoid")
