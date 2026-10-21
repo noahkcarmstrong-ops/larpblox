@@ -166,9 +166,7 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
                 if object:IsA("BasePart") and object.Name~="HumanoidRootPart" then
                     if object:IsA("MeshPart")then return {"Color","Size","Transparency","MeshId","TextureID"}end
                     return {"Color","Size","Transparency"}
-                elseif object:IsA("Shirt")then return {"ShirtTemplate"}
-                elseif object:IsA("Pants")then return {"PantsTemplate"}
-                elseif object:IsA("ShirtGraphic")then return {"Graphic"}
+                elseif object:IsA("Clothing") or object:IsA("ShirtGraphic")then return nil
                 elseif object:IsA("CharacterMesh")then return {"MeshId","BaseTextureId","OverlayTextureId"}
                 elseif object:IsA("BodyColors")then return {"HeadColor3","TorsoColor3","LeftArmColor3","RightArmColor3","LeftLegColor3","RightLegColor3"}
                 elseif object:IsA("Accessory") or object:IsA("Hat")then return {}end
