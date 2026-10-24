@@ -336,16 +336,11 @@ function M.create(player,getPreviews)
     end
     local function renderPreview(entry,parent,isCurrent)
         if (currentSnapshot or currentImage) then
-                    local waitingForPose=false
-                    if not currentImage then
-                        for _,item in ipairs(currentSnapshot and currentSnapshot.items or {})do
-                            if item.assetType==19 then waitingForPose=true;break end
-                        end
-                    end
+                    -- A browser portrait is optional; gear must not block the local 3D fallback.
                     local key=(currentSnapshot and game:GetService("HttpService"):JSONEncode(currentSnapshot) or "").."|"..tostring(currentImage or "")
                     local ok,err=pcall(function()
                         local previews=getPreviews and getPreviews() or nil
-                        if not currentImage and not waitingForPose and (key~=previewKey or not previewData) then
+                        if not currentImage and (key~=previewKey or not previewData) then
                             if previewBuild and previewBuild.key==key then return end
                             local ticket={key=key};previewBuild=ticket
                             local snapshot=currentSnapshot
@@ -362,7 +357,7 @@ function M.create(player,getPreviews)
                             previewData=data;previewKey=key
                         end
                         if not isCurrent() then return end
-                        local overlayClass=currentImage and "ImageLabel" or waitingForPose and "TextLabel" or "ViewportFrame"
+                        local overlayClass=currentImage and "ImageLabel" or "ViewportFrame"
                         if entry.overlay and not entry.overlay.Parent then entry.overlay=nil;entry.key=nil end
                         if entry.overlay and entry.overlay.ClassName~=overlayClass then
                             entry.overlay:Destroy();entry.overlay=nil;entry.key=nil

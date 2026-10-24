@@ -125,7 +125,9 @@ assert(title.Visible and itemContent.Visible,"the redirected title and refreshed
 local gearSnapshot={version=3,definition=snapshot.definition,items={{id=100,assetType=11,name="Larp Shirt"},{id=2906731343,assetType=19,name="Admin Pizza Launcher"}}}
 api.update({enabled=true,name="LarpAlias",snapshot=gearSnapshot})
 api.update({enabled=true,name="LarpAlias",snapshot=gearSnapshot})
-assert(liveOverlay().ClassName=="TextLabel" and liveOverlay().Text=="Loading profile pose...","gear preview waits for posed image instead of arms-down fallback")
+assert(liveOverlay().ClassName=="ViewportFrame" and liveOverlay().Visible,"gear avatar must render even when the profile image never arrives")
+advanceRecovery(100)
+assert(liveOverlay().ClassName=="ViewportFrame" and liveOverlay().Visible,"missing profile images cannot leave the avatar waiting indefinitely")
 api.update({enabled=true,name="LarpAlias",snapshot=gearSnapshot,image="rbxassetid://posed-gear"})
 assert(liveOverlay().ClassName=="ImageLabel" and liveOverlay().Image=="rbxassetid://posed-gear","late posed image replaces loading state")
 
