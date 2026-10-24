@@ -110,9 +110,21 @@ return function(player,onStatus,managedRespawn,readAsset)
     end
     local function prepareOriginal(ctx,kind)
         if originals[kind]~=nil then return end
+        -- The live character can use a game-applied outfit whose clothing IDs
+        -- differ from the account description. Preserve that spawned baseline
+        -- so later package swaps still recognize and remap the native slots.
+        local current
+        if active then
+            for object,record in pairs(active.records)do
+                if record.kind==kind and not record.synthetic and object.Parent==active.character and record.source~="" then
+                    current=record.source;break
+                end
+            end
+        end
+        if current then originals[kind]=current;return end
         local id=accountId(ctx,kind)
-        assert(id~=nil,"Could not identify your original clothing; existing game clothing was preserved.")
-        originals[kind]=id==0 and "" or select(1,resolveTemplate(ctx,kind,id))
+        originals[kind]=id==nil and nil or (id==0 and "" or select(1,resolveTemplate(ctx,kind,id)))
+        assert(originals[kind]~=nil,"Could not identify your original clothing; existing game clothing was preserved.")
     end
     local function write(record,value)
         if record.object[record.property]==value then record.written=value;return end
@@ -218,6 +230,7 @@ return function(player,onStatus,managedRespawn,readAsset)
             end
         end
         local view={character=character,records={},connections={},pending={}}
+        originals={}
         active=view;characters[character]=view
         view.connections[1]=character.ChildAdded:Connect(function(object)track(view,object,false)end)
         view.destroying=character.Destroying:Connect(function()closeView(view,false)end)
