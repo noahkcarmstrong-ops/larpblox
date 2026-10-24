@@ -7,6 +7,10 @@ return function(source)
     local function rig(size)
         local model=Instance.new("Model")
         local h=Instance.new("Humanoid");h.RigType=Enum.HumanoidRigType.R15;h.Parent=model
+        for _,name in ipairs({"BodyHeightScale","BodyWidthScale","BodyDepthScale","HeadScale","BodyTypeScale","BodyProportionScale"})do
+            local value=Instance.new("NumberValue");value.Name=name
+            value.Value=(name=="BodyTypeScale" or name=="BodyProportionScale") and 0 or 1;value.Parent=h
+        end
         for _,name in ipairs(parts)do
             local p=Instance.new("MeshPart");p.Name=name;p.Anchored=true;p.Size=Vector3.new(size,size,size);p.Parent=model
         end
@@ -59,17 +63,24 @@ return function(source)
     api.applyBodyParts(body,{height=1.1})
     assert(generated==3,"changed scales invalidate the body cache")
     local humanoid=character.Humanoid
-    assert(meshChecks>0 and humanoid.AutomaticScalingEnabled==true,"successful replacements restore native scaling")
-    humanoid.AutomaticScalingEnabled=false
-    api.applyBodyParts(body,{height=1.1})
-    assert(humanoid.AutomaticScalingEnabled==false,"an already disabled scaler remains disabled")
-    humanoid.AutomaticScalingEnabled=true
+    assert(meshChecks>0 and humanoid.AutomaticScalingEnabled==false,"mapped bodies keep native scaling disabled")
+    api.setScales({height=1.2})
+    assert(generated==4 and humanoid.AutomaticScalingEnabled==false,"scale changes regenerate the mapped body")
     failNext=true
-    local applied=pcall(api.applyBodyParts,body,{height=1.1})
-    assert(not applied and humanoid.AutomaticScalingEnabled==true,"rollback restores the original scaling flag")
+    local applied=pcall(api.applyBodyParts,body,{height=1.2})
+    assert(not applied and humanoid.AutomaticScalingEnabled==false,"rollback preserves the prior scaling flag")
     assert(head.Size==Vector3.new(2,2,2),"rollback preserves the previous body")
+    api.restoreBody()
+    assert(humanoid.AutomaticScalingEnabled==true and head.Size==Vector3.new(1,1,1),"undo restores native body and original scaling")
+    api.applyBodyParts(body,{height=1.2})
     api.destroy()
-    assert(head.Size==Vector3.new(1,1,1),"destroy restores original appearance")
+    assert(head.Size==Vector3.new(1,1,1) and humanoid.AutomaticScalingEnabled==true,"destroy restores original appearance and scaling")
+    humanoid.AutomaticScalingEnabled=false
+    local disabled=chunk()(p,nil,nil,true,diagnostics)
+    disabled.applyBodyParts(body,{height=1.2})
+    disabled.restoreBody()
+    assert(humanoid.AutomaticScalingEnabled==false,"a natively disabled scaler stays disabled on undo")
+    disabled.destroy()
     character:Destroy();event:Destroy()
     return "PASS: one generation for six regions, cache reuse, scale invalidation, part identity, atomic scaling and restoration"
 end

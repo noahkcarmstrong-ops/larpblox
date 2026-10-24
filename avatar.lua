@@ -302,6 +302,9 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
     local function capture(ctx,body)
         if not snapshot then
             local saved={character=ctx.character,colors={},bodyColors={},meshes={},parts={},bodyChanged=false}
+            if ctx.humanoid.RigType==Enum.HumanoidRigType.R15 then
+                saved.automaticScaling=ctx.humanoid.AutomaticScalingEnabled
+            end
             for _,item in ipairs(ctx.character:GetChildren()) do
                 if item:IsA("BasePart") and item.Name~="HumanoidRootPart" then
                     saved.colors[item.Name]=item.Color
@@ -346,6 +349,37 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             end
             snapshot.hipHeight=ctx.humanoid.HipHeight
         end
+    end
+    local function freezeBodyScaling(ctx)
+        if ctx.humanoid.RigType==Enum.HumanoidRigType.R15 and snapshot then
+            if snapshot.automaticScaling==nil then snapshot.automaticScaling=ctx.humanoid.AutomaticScalingEnabled end
+            ctx.humanoid.AutomaticScalingEnabled=false
+        end
+    end
+    local function restoreBodyScaling(ctx)
+        if snapshot and snapshot.character==ctx.character and snapshot.automaticScaling~=nil then
+            ctx.humanoid.AutomaticScalingEnabled=snapshot.automaticScaling
+            snapshot.automaticScaling=nil
+        end
+    end
+    local bodyPartSource
+    local function resolvedBodyParts(ctx)
+        if not next(settings.bodyParts) then return nil end
+        local description=ctx.humanoid:GetAppliedDescription()
+        local result={Head=description.Head or 0,Torso=description.Torso or 0,LeftArm=description.LeftArm or 0,
+            RightArm=description.RightArm or 0,LeftLeg=description.LeftLeg or 0,RightLeg=description.RightLeg or 0}
+        description:Destroy()
+        for _,region in ipairs({"Head","Torso","LeftArm","RightArm","LeftLeg","RightLeg"})do
+            local value=settings.bodyParts[region]
+            if value~=nil then
+                if type(value)~="number" then
+                    local template,remember,id=bodyPartSource(ctx,region,value)
+                    remember();template:Destroy();value=id
+                end
+                result[region]=value
+            end
+        end
+        return result
     end
     local function paint(c,color,region)
         local colors=c:FindFirstChildOfClass("BodyColors")
@@ -576,10 +610,11 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             if joint:IsA("Motor6D") then joints[joint]={C0=joint.C0,C1=joint.C1} end
         end
         for _,name in ipairs(names) do backups[name]=bodyClone(ctx.character:FindFirstChild(name)) end
-        -- Native scaling must not resize a partly updated body using the old package.
+        -- Keep native scaling from resizing mapped meshes using the original package.
         local automaticScaling
         if ctx.humanoid and ctx.humanoid.RigType==Enum.HumanoidRigType.R15 then
             automaticScaling=ctx.humanoid.AutomaticScalingEnabled
+            if snapshot and snapshot.automaticScaling==nil then snapshot.automaticScaling=automaticScaling end
             ctx.humanoid.AutomaticScalingEnabled=false
         end
         local ok,err=pcall(function()
@@ -601,7 +636,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             end
             for joint,offset in pairs(joints) do joint.C0,joint.C1=offset.C0,offset.C1 end
         end
-        if automaticScaling~=nil then ctx.humanoid.AutomaticScalingEnabled=automaticScaling end
+        if not ok and automaticScaling~=nil then ctx.humanoid.AutomaticScalingEnabled=automaticScaling end
         for _,part in pairs(backups) do part:Destroy() end
         assert(ok,err)
     end
@@ -1129,6 +1164,14 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         capture(ctx,true)
         for key,value in pairs(values)do ctx.humanoid[scaleFields[key]].Value=value end
         settings.scales=table.clone(values);save()
+        if snapshot and snapshot.bodyChanged and not reapplying then
+            if settings.body then
+                api.applyBody(settings.body)
+            else
+                local body=resolvedBodyParts(ctx)
+                if body then api.applyBodyParts(body,values,false) else freezeBodyScaling(ctx) end
+            end
+        end
         return "Avatar proportions applied."
     end
     function api.setSkin(color,region)
@@ -1159,7 +1202,11 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
     end
     local function bodySource(ctx,value)
         local isR6=ctx.humanoid.RigType==Enum.HumanoidRigType.R6
-        local cacheKey=tostring(ctx.humanoid.RigType)..":"..tostring(value)
+        local scaleKey={}
+        for _,key in ipairs({"height","width","depth","head","bodyType","proportion"})do
+            scaleKey[#scaleKey+1]=tostring((settings.scales or {})[key] or "")
+        end
+        local cacheKey=tostring(ctx.humanoid.RigType)..":"..tostring(value)..":"..table.concat(scaleKey,",")
         if fullBodyTemplates[cacheKey]then return fullBodyTemplates[cacheKey]:Clone()end
         local outfit=outfits[value]
         if value~="Blocky" and not outfit then
@@ -1187,6 +1234,10 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             end
             source:Destroy()
         end
+        if not isR6 then for key,field in pairs(descriptionScales)do
+            local value=settings.scales and settings.scales[key]
+            if value~=nil then description[field]=value end
+        end end
         local ok,template=pcall(function() return nativeCall("Players.CreateHumanoidModelFromDescriptionAsync",function()return Players:CreateHumanoidModelFromDescriptionAsync(description,ctx.humanoid.RigType)end) end)
         description:Destroy()
         if not valid(ctx) then if ok and template then template:Destroy() end;check(ctx) end
@@ -1269,6 +1320,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
                 refitAccessories(ctx)
                 local humanoid=template:FindFirstChildOfClass("Humanoid")
                 if humanoid then ctx.humanoid.HipHeight=humanoid.HipHeight end
+                freezeBodyScaling(ctx)
             end
             snapshot.bodyChanged=true
         end)
@@ -1311,6 +1363,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
                 refitAccessories(ctx)
                 local generatedHumanoid=template:FindFirstChildOfClass("Humanoid")
                 if generatedHumanoid and generatedHumanoid.HipHeight~=nil then ctx.humanoid.HipHeight=generatedHumanoid.HipHeight end
+                freezeBodyScaling(ctx)
             end
             snapshot.bodyChanged=true
             if skin.All then paint(ctx.character,skin.All,"All") end
@@ -1322,7 +1375,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         return "Body package applied (visible to you)."
     end
     local bodyPartTemplates,bodyPartOrder={},{}
-    local function bodyPartSource(ctx,region,value)
+    bodyPartSource=function(ctx,region,value)
         assert(bodyRegions[region],"Choose a body region.")
         local isR6=ctx.humanoid.RigType==Enum.HumanoidRigType.R6
         local field=region;local names=regionNames(region)
@@ -1387,7 +1440,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
                 bodyPartTemplates[old].model:Destroy();bodyPartTemplates[old]=nil
             end
         end
-        return template,remember
+        return template,remember,id
     end
     function api.applyBodyPart(region,value)
         local ctx=context()
@@ -1424,6 +1477,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         local applied,message=pcall(function() capture(ctx,true);replaceParts(ctx,parts,names);refitAccessories(ctx) end)
         template:Destroy()
         assert(applied,message)
+        freezeBodyScaling(ctx)
         snapshot.bodyChanged=true
         if not reapplying then settings.bodyParts[region]=value;save() end
         return region.." body part applied (visible to you)."
@@ -1435,6 +1489,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
                 restoreR6Region(ctx,region)
             elseif next(snapshot.parts) then
                 replaceParts(ctx,snapshot.parts,regionNames(region))
+                freezeBodyScaling(ctx)
             end
         end
         settings.bodyParts[region]=nil;save()
@@ -1525,6 +1580,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
                 end
             end
             snapshot.bodyChanged=false
+            restoreBodyScaling(ctx)
         end
         for name,value in pairs(snapshot.scales or {})do
             local scale=ctx.humanoid:FindFirstChild(name)
@@ -1554,6 +1610,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
                 end
             end
             snapshot.bodyChanged=false
+            restoreBodyScaling(ctx)
         end
         settings.body=nil;settings.bodyParts={};save()
         return "Original body restored."
