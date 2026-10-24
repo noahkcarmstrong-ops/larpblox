@@ -8,7 +8,7 @@ return function(source)
         local model=Instance.new("Model")
         local h=Instance.new("Humanoid");h.RigType=Enum.HumanoidRigType.R15;h.Parent=model
         for _,name in ipairs(parts)do
-            local p=Instance.new("Part");p.Name=name;p.Anchored=true;p.Size=Vector3.new(size,size,size);p.Parent=model
+            local p=Instance.new("MeshPart");p.Name=name;p.Anchored=true;p.Size=Vector3.new(size,size,size);p.Parent=model
         end
         local root=Instance.new("Part");root.Name="HumanoidRootPart";root.Anchored=true;root.Parent=model
         return model
@@ -30,7 +30,16 @@ return function(source)
         error("batch body must not issue extra metadata/preload requests: "..name)
     end}},{__index=getfenv()})
     local chunk=assert(loadstring(source));setfenv(chunk,environment)
-    local api=chunk()(p,nil,nil,true)
+    local failNext,meshChecks=false,0
+    local diagnostics={run=function(operation,_,callback,...)
+        if operation=="MeshPart.ApplyMesh" then
+            assert(character.Humanoid.AutomaticScalingEnabled==false,"body replacement must pause automatic scaling")
+            meshChecks=meshChecks+1
+            if failNext then failNext=false;error("Fixture blocked mesh update")end
+        end
+        return callback(...)
+    end}
+    local api=chunk()(p,nil,nil,true,diagnostics)
     local body={Head=1,Torso=2,LeftArm=3,RightArm=4,LeftLeg=5,RightLeg=6}
     local head=character.Head
     api.applyBodyParts(body,{height=1})
@@ -49,8 +58,18 @@ return function(source)
     body.RightLeg=6
     api.applyBodyParts(body,{height=1.1})
     assert(generated==3,"changed scales invalidate the body cache")
+    local humanoid=character.Humanoid
+    assert(meshChecks>0 and humanoid.AutomaticScalingEnabled==true,"successful replacements restore native scaling")
+    humanoid.AutomaticScalingEnabled=false
+    api.applyBodyParts(body,{height=1.1})
+    assert(humanoid.AutomaticScalingEnabled==false,"an already disabled scaler remains disabled")
+    humanoid.AutomaticScalingEnabled=true
+    failNext=true
+    local applied=pcall(api.applyBodyParts,body,{height=1.1})
+    assert(not applied and humanoid.AutomaticScalingEnabled==true,"rollback restores the original scaling flag")
+    assert(head.Size==Vector3.new(2,2,2),"rollback preserves the previous body")
     api.destroy()
     assert(head.Size==Vector3.new(1,1,1),"destroy restores original appearance")
     character:Destroy();event:Destroy()
-    return "PASS: one generation for six regions, cache reuse, scale invalidation, part identity and restoration"
+    return "PASS: one generation for six regions, cache reuse, scale invalidation, part identity, atomic scaling and restoration"
 end

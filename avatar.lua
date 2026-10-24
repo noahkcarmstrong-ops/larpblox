@@ -576,6 +576,12 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             if joint:IsA("Motor6D") then joints[joint]={C0=joint.C0,C1=joint.C1} end
         end
         for _,name in ipairs(names) do backups[name]=bodyClone(ctx.character:FindFirstChild(name)) end
+        -- Native scaling must not resize a partly updated body using the old package.
+        local automaticScaling
+        if ctx.humanoid and ctx.humanoid.RigType==Enum.HumanoidRigType.R15 then
+            automaticScaling=ctx.humanoid.AutomaticScalingEnabled
+            ctx.humanoid.AutomaticScalingEnabled=false
+        end
         local ok,err=pcall(function()
             for _,name in ipairs(names) do
                 local target=ctx.character:FindFirstChild(name)
@@ -595,6 +601,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             end
             for joint,offset in pairs(joints) do joint.C0,joint.C1=offset.C0,offset.C1 end
         end
+        if automaticScaling~=nil then ctx.humanoid.AutomaticScalingEnabled=automaticScaling end
         for _,part in pairs(backups) do part:Destroy() end
         assert(ok,err)
     end
