@@ -30,7 +30,6 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
     local sharing=false
     local generation=0
     local peers={}
-    local imageSerial=0
     local lastSent
     local transport=presentation.transport
     local latestRecords,pending,connections={},{},{}
@@ -73,7 +72,6 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         for _,api in ipairs({entry.names,entry.animations,entry.clothes,entry.avatar,entry.views})do
             if api and api.destroy then pcall(api.destroy)end
         end
-        if entry.imagePath and type(delfile)=="function" then pcall(delfile,entry.imagePath)end
     end
     local function cleanupAll()
         for userId in pairs(peers)do cleanupPeer(userId)end
@@ -123,36 +121,9 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         entry.verified=record.verified==true
         if presentation.createViews and peers[record.userId]==entry and sharing and isAlive() then
             if not entry.views then entry.views=presentation.createViews(entry.player)end
-            local options={enabled=true,name=name and name.enabled and name.username or "",displayName=name and name.enabled and name.displayName or "",verified=record.verified==true,snapshot=record.snapshot,image=entry.image}
-            entry.viewOptions=options
-            local custom=getcustomasset or getsynasset
-            if record.imageUrl~=entry.presentationImageUrl then
-                entry.imageGeneration=(entry.imageGeneration or 0)+1
-                entry.image=nil;options.image=nil
-            end
+            local options={enabled=true,name=name and name.enabled and name.username or "",displayName=name and name.enabled and name.displayName or "",verified=record.verified==true,snapshot=record.snapshot}
             entry.views.update(options)
-            if record.imageUrl and record.imageUrl~=entry.presentationImageUrl and type(custom)=="function" and type(writefile)=="function" then
-                local imageGeneration=entry.imageGeneration
-                task.spawn(function()
-                    local loaded,reason=pcall(function()
-                        local bytes=transport.downloadImage(record.imageUrl)
-                        assert(type(bytes)=="string" and #bytes<=4*1024*1024 and bytes:sub(1,8)=="\137PNG\r\n\26\n","Invalid shared avatar image.")
-                        if peers[record.userId]~=entry or entry.imageGeneration~=imageGeneration or not sharing or not isAlive() then return end
-                        imageSerial=imageSerial+1
-                        local path="larpblox-shared-avatar-"..record.userId.."-"..imageSerial..".png"
-                        local previousPath=entry.imagePath
-                        entry.imagePath=path
-                        writefile(path,bytes)
-                        local image=custom(path)
-                        if peers[record.userId]~=entry or entry.imageGeneration~=imageGeneration or not sharing or not isAlive() then return end
-                        entry.image=image;entry.viewOptions.image=image;entry.views.update(entry.viewOptions)
-                        if previousPath and type(delfile)=="function"then pcall(delfile,previousPath)end
-                    end)
-                    if not loaded and peers[record.userId]==entry then status("Shared avatar image: "..tostring(reason))end
-                end)
-            end
         end
-        entry.presentationImageUrl=record.imageUrl
         entry.presented=record
     end
     local function observeAppearance(entry,userId)
