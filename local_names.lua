@@ -7,40 +7,18 @@ local function plain(value, rich)
     return value:gsub("<[^>]*>", ""):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&quot;", '"'):gsub("&apos;", "'"):gsub("&amp;", "&")
 end
 local controllers, identities, usernames, displays = {}, {}, {}, {}
--- One pass-through hook survives interface reloads. Only explicitly mapped
--- Player objects are keys; never intercept Instance names or child lookups.
+-- Retire the old read override on reload. Player identity is a gameplay key
+-- (including table indexes and child lookups), not a presentation surface.
+-- Keep the old hook pass-through rather than restoring a shared metamethod
+-- that another script may have hooked since. All aliases are rendered below.
 local nameReads
 if type(getgenv)=="function" then
     nameReads=rawget(getgenv(),"__LarpbloxNameReads")
+    if nameReads and type(nameReads.targets)=="table" then table.clear(nameReads.targets)end
 end
 local function originalName(player,key)
     if nameReads then return nameReads.original(player,key) end
     return player[key]
-end
-local function bindNameReads()
-    if nameReads then return true end
-    if type(hookmetamethod)~="function" or type(getgenv)~="function" then return false end
-    local state={targets=setmetatable({}, {__mode="k"})}
-    local original
-    local function intercept(object,key)
-        if key=="Name" or key=="DisplayName" then
-            local mapped=state.targets[object]
-            if mapped then
-                local value=mapped[key]
-                if value and value~="" then return value end
-            end
-        end
-        return original(object,key)
-    end
-    -- Executor scripts also consume these values (for example ESP labels), so
-    -- checkcaller must not bypass this mapping. Internal identity uses original.
-    local ok,previous=pcall(hookmetamethod,game,"__index",type(newcclosure)=="function" and newcclosure(intercept) or intercept)
-    if not ok or type(previous)~="function" then return false end
-    original=previous
-    state.original=previous
-    getgenv().__LarpbloxNameReads=state
-    nameReads=state
-    return true
 end
 local chatAliases={}
 local entries = setmetatable({}, {__mode="k"})
@@ -152,10 +130,19 @@ local function resolve(entry)
         ancestor=ancestor.Parent
     end
     entry.semanticField=semanticField
-    -- Fallback for cached/server-supplied identity text. Fresh client UI should
-    -- consume the mapped Player properties; do not parse composite stat labels.
-    local name=text:match("^@(.+)$") or text:match("^(.-)'s%s") or text
-    local ranked=text:match("^#%d+%s*%-%s*(.+)$")
+    -- Resolve displayed identity without changing the Player properties that
+    -- games use for roster, round-data, remote and character lookups.
+    -- Native labels may decorate a name with bracketed rank/membership tags.
+    -- Resolve the remaining exact identity, retaining the decoration verbatim.
+    local identityText=text
+    while true do
+        local suffix=identityText:match("^%b[]%s+(.+)$")
+        if not suffix then break end
+        identityText=suffix
+    end
+    entry.decorated=identityText~=text
+    local name=identityText:match("^@(.+)$") or identityText:match("^(.-)'s%s") or identityText
+    local ranked=identityText:match("^#%d+%s*%-%s*(.+)$")
     if ranked and semanticField then name=ranked end
     local id
     if semanticField=="username" then id=usernames[name]
@@ -312,6 +299,14 @@ local function replacement(entry, controller)
     if entry.object.RichText then username,display=escape(username),escape(display) end
     -- Rewrite text segments only, preserving markup and its attributes.
     local function segment(text)
+        local decoration=""
+        if entry.decorated then
+            while true do
+                local prefix,suffix=text:match("^(%b[]%s+)(.*)$")
+                if not prefix then break end
+                decoration=decoration..prefix;text=suffix
+            end
+        end
         -- One substitution pass prevents aliases from being substituted again.
         local matches={}
         local replacements=entry.semanticField=="username" and {{identity.username,username}}
@@ -337,7 +332,7 @@ local function replacement(entry, controller)
         for _,match in ipairs(matches) do
             if match[1]>=cursor then out[#out+1]=text:sub(cursor,match[1]-1);out[#out+1]=match[3];cursor=match[2]+1 end
         end
-        out[#out+1]=text:sub(cursor);return table.concat(out)
+        out[#out+1]=text:sub(cursor);return decoration..table.concat(out)
     end
     if not entry.object.RichText then return segment(entry.source) end
     local out,cursor={},1
@@ -516,9 +511,6 @@ return function(player, playerGui, gameObject)
     controllers[id]=controller
     identities[id]=identities[id] or {username=originalName(player,"Name"),display=originalName(player,"DisplayName") or originalName(player,"Name")}
     local originalDisplay=identities[id].display
-    local mappedNames={}
-    controller.mappedNames=mappedNames
-    local readsAvailable=bindNameReads()
     rebuildIdentities()
     bindChat()
     bindNotifications()
@@ -534,7 +526,6 @@ return function(player, playerGui, gameObject)
             local identity=controllers[leaving.UserId]
             if identity then
                 identity.settings.enabled=false
-                if nameReads and nameReads.targets[leaving]==identity.mappedNames then nameReads.targets[leaving]=nil end
             end
             refreshRoster(leaving.UserId)
         end)
@@ -587,13 +578,6 @@ return function(player, playerGui, gameObject)
     local characterConnection=player.CharacterAdded:Connect(watchCharacter)
     watchCharacter(player.Character)
     local function refresh()
-        local settings=controller.settings
-        if readsAvailable then
-            mappedNames.Name=settings.username
-            mappedNames.DisplayName=settings.displayName
-            if settings.enabled then nameReads.targets[player]=mappedNames
-            elseif nameReads.targets[player]==mappedNames then nameReads.targets[player]=nil end
-        end
         for entry in pairs(buckets[id] or {}) do render(entry) end
         for entry in pairs(notificationEntries) do render(entry) end
         applyHumanoid(player.Character)
@@ -623,7 +607,7 @@ return function(player, playerGui, gameObject)
     end
     function api.report()
         return "Names are local only. "..(controller.settings.enabled and
-            ((readsAvailable and "Player name reads mapped locally. " or "Name read hook unavailable; UI fallback only. ")..chatStatus)
+            ("Displayed names mapped locally. "..chatStatus)
             or "Override disabled.")
     end
     function api.destroy()
