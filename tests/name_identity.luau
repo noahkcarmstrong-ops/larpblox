@@ -34,13 +34,14 @@ return function(source)
         end
         legacy.targets[localPlayer]={Name="StaleAlias",DisplayName="Stale Display"}
         environment.__LarpbloxNameReads=legacy
+        environment.__LarpbloxNotificationInterceptor={transform=function()error("retired notification hook ran")end}
         assert(players:FindFirstChild(localPlayer.Name)==nil,"fixture reproduces the legacy identity failure")
         local installs=0
         local services={Players=players,CoreGui=core}
         local env=setmetatable({game={Workspace=world,GetService=function(_,name)return services[name]end},
             getgenv=function()return environment end,
             hookmetamethod=function(_,key)
-                if key=="__index"then installs=installs+1 end
+                installs=installs+1
                 return function(object,property,value)if value~=nil then object[property]=value end end
             end,
         },{__index=getfenv()})
@@ -60,6 +61,8 @@ return function(source)
         local spectate=label("OtherUser")
         local conflict=label("[ELITE] OriginalUser",nil,456)
         local unrelated=label("OriginalUser scored 10 points")
+        local notifications=Instance.new("Frame");notifications.Name="Notifications";notifications.Parent=core
+        local notice=Instance.new("TextLabel");notice.Text="OriginalUser joined the experience";notice.Parent=notifications
         local make=factory()
         assert(next(legacy.targets)==nil,"reload retires legacy spoof targets")
         local api=own(make(localPlayer,root),"destroy")
@@ -75,6 +78,14 @@ return function(source)
             end
         end
         checkIdentity()
+        assert(environment.__LarpbloxNotificationInterceptor.transform==nil,"reload retires the legacy notification handler")
+        assert(notice.Text=="LarpUser joined the experience","native notification text is mapped without a global hook")
+        notice.Text="OriginalUser left the experience";task.wait();task.wait()
+        assert(notice.Text=="LarpUser left the experience","native notification redraws use Text events")
+        local late=Instance.new("TextLabel");late.Text="";late.Parent=notifications;task.wait()
+        late.Text="OtherUser joined the experience";task.wait();task.wait()
+        assert(late.Text=="LarpPeer joined the experience","late notification text is observed without intercepting assignments")
+        assert(installs==0,"name presentation must not install global read or write hooks")
         assert(basic.Text=="LarpUser"and decorated.Text=="[ELITE] LarpUser","native leaderboard labels display aliases and preserve tags")
         assert(collidingTag.Text=="[OriginalUser] LarpUser","rank tags are not rewritten when they match a username")
         assert(rich.Text=='<b>[VIP] LarpUser</b>',"rich name decoration is preserved")
@@ -88,6 +99,7 @@ return function(source)
         assert(decorated.Text=="[VIP] NextUser"and spectate.Text=="NextPeer","native redraws keep aliases")
         api.setEnabled(false);peerApi.setEnabled(false);checkIdentity()
         assert(decorated.Text=="[VIP] OriginalUser"and spectate.Text=="OtherUser","disable restores current native text")
+        assert(notice.Text=="OriginalUser left the experience"and late.Text=="OtherUser joined the experience","disable restores original notification text")
         api.setEnabled(true);api.destroy();peerApi.destroy();checkIdentity()
         local reloaded=own(factory()(localPlayer,root),"destroy")
         reloaded.set("ReloadedUser","Reloaded Display");checkIdentity()

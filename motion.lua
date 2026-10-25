@@ -291,22 +291,22 @@ return function(player,onStatus,managedRespawn)
             if runtime.callbacks[object]==handler then runtime.callbacks[object]=nil end
         end
         observedCallbacks={}
-        if not character then return end
-        if not runtime.assignmentHook and type(hookmetamethod)=="function"then
-            local original
-            original=hookmetamethod(game,"__newindex",newcclosure(function(object,key,value)
-                original(object,key,value)
-                if key=="OnInvoke"then
-                    local handler=runtime.callbacks[object]
-                    if handler then handler(value)end
-                end
-            end))
-            runtime.assignmentHook=true
-        end
+        if not character or not (walkingEnabled or jumpingEnabled)then unbindWalking();return end
         local function watch(object)
             if object:IsA("BindableFunction") and object.Name=="PlayEmote"then
-                local handler=function(value)
-                    if not walkingHook or value~=walkingHook.native then scheduleBinding()end
+                local handler=function()scheduleBinding()end
+                -- Observe this callback at its actual use, before Roblox dispatches
+                -- OnInvoke. Callback assignment has no native property event.
+                -- Only the relevant method is hooked; unrelated property writes
+                -- never enter an executor hook.
+                if not runtime.invokeHook then
+                    local originalInvoke
+                    originalInvoke=hookfunction(object.Invoke,function(target,...)
+                        local current=runtime.callbacks[target]
+                        if current then current()end
+                        return originalInvoke(target,...)
+                    end)
+                    runtime.invokeHook=true
                 end
                 runtime.callbacks[object]=handler;observedCallbacks[object]=handler
                 scheduleBinding()
@@ -328,12 +328,12 @@ return function(player,onStatus,managedRespawn)
     end
     function api.setEmoteWhileWalking(enabled)
         assert(type(getcallbackvalue)=="function" and type(hookfunction)=="function","Your executor cannot enable movement during emotes.")
-        walkingEnabled=enabled==true;saveEmoteOptions();scheduleBinding();return walkingEnabled
+        walkingEnabled=enabled==true;saveEmoteOptions();watchEmoteControls(player.Character);return walkingEnabled
     end
     function api.getEmoteWhileWalking()return walkingEnabled end
     function api.setEmoteWhileJumping(enabled)
         assert(type(getcallbackvalue)=="function" and type(hookfunction)=="function","Your executor cannot enable movement during emotes.")
-        jumpingEnabled=enabled==true;saveEmoteOptions();scheduleBinding();return jumpingEnabled
+        jumpingEnabled=enabled==true;saveEmoteOptions();watchEmoteControls(player.Character);return jumpingEnabled
     end
     function api.getEmoteWhileJumping()return jumpingEnabled end
     function api.setIsolateEmote(enabled)

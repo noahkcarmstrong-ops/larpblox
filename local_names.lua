@@ -174,8 +174,13 @@ local function resolve(entry)
     return id or nil
 end
 local notificationEntries=setmetatable({}, {__mode="k"})
-local notificationHook
-local notificationSources=setmetatable({}, {__mode="k"})
+-- Older interfaces installed a global property-write interceptor. Retire its
+-- handler on reload; native Text events below own notification presentation.
+-- Do not restore a shared metamethod that another script may now own.
+if type(getgenv)=="function" then
+    local previous=rawget(getgenv(),"__LarpbloxNotificationInterceptor")
+    if type(previous)=="table"then previous.transform=nil end
+end
 local function isSystemChat(object)
     local ancestor=object
     local system=false
@@ -243,38 +248,6 @@ local function notificationText(source,rich)
         out[#out+1]=segment(source:sub(cursor,first-1));out[#out+1]=source:sub(first,last);cursor=last+1
     end
     return table.concat(out)
-end
-local function bindNotifications()
-    if notificationHook or type(hookmetamethod)~="function" or type(getgenv)~="function" then return end
-    local environment=getgenv()
-    local state=rawget(environment,"__LarpbloxNotificationInterceptor")
-    if not state then
-        state={}
-        local original
-        local function intercept(object,key,value)
-            if key=="Text" and type(value)=="string" and state.transform then
-                local ok,result=pcall(state.transform,object,value)
-                if ok then value=result end
-            end
-            return original(object,key,value)
-        end
-        local ok,previous=pcall(hookmetamethod,game,"__newindex",type(newcclosure)=="function" and newcclosure(intercept) or intercept)
-        if not ok or type(previous)~="function" then return end
-        original=previous
-        environment.__LarpbloxNotificationInterceptor=state
-    end
-    local transform=function(object,value)
-        if not isNotification(object) then return value end
-        local entry=entries[object]
-        -- Retain original text for alias changes and disable/restore.
-        if entry and value~=entry.written then entry.source=value
-        elseif not entry then notificationSources[object]=value end
-        local updated=notificationText(value,object.RichText)
-        if entry then entry.written=updated end
-        return updated
-    end
-    state.transform=transform
-    notificationHook={state=state,transform=transform}
 end
 local function replacement(entry, controller)
     if isNotification(entry.object) or isSystemChat(entry.object) then return notificationText(entry.source,entry.object.RichText) end
@@ -478,8 +451,7 @@ local function unwatch(object)
 end
 local function watch(object)
     if entries[object] or not (object:IsA("TextLabel") or object:IsA("TextButton")) then return end
-    local entry={object=object,source=notificationSources[object] or object.Text,connections={}}
-    notificationSources[object]=nil
+    local entry={object=object,source=object.Text,connections={}}
     entries[object]=entry
     entry.connections[#entry.connections+1]=object:GetPropertyChangedSignal("Text"):Connect(function()
         if object.Text==entry.written then return end
@@ -513,7 +485,6 @@ return function(player, playerGui, gameObject)
     local originalDisplay=identities[id].display
     rebuildIdentities()
     bindChat()
-    bindNotifications()
     if not knownIdentity then
         -- Only a new identity can change existing labels' resolution.
         for _,entry in pairs(entries) do bind(entry) end
@@ -618,8 +589,6 @@ return function(player, playerGui, gameObject)
         for humanoid,original in pairs(humanoids) do pcall(function() humanoid.DisplayName=original end) end
         if next(controllers)==nil then
             unbindChat()
-            if notificationHook and notificationHook.state.transform==notificationHook.transform then notificationHook.state.transform=nil end
-            notificationHook=nil
             for object in pairs(entries) do unwatch(object) end
             for _,connections in pairs(rootConnections) do for _,connection in ipairs(connections) do connection:Disconnect() end end
             for _,connection in ipairs(rosterConnections) do connection:Disconnect() end
