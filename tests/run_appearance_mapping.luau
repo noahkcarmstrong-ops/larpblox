@@ -141,3 +141,5 @@ local sharing=luau.load(fs.readFile("tests/shared_mapping.luau"),{environment=en
 print(sharing(fs.readFile("shared_larp.lua"),avatar,mapping))
 local clothing=luau.load(fs.readFile("tests/clothing_mapping.luau"),{environment=environment})()
 print(clothing(mapping,fs.readFile("clothes.lua")))
+local accessories=luau.load(fs.readFile("tests/accessory_admission.luau"),{environment=environment})()
+print(accessories(avatar,mapping))

@@ -938,9 +938,21 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics,createMappi
         local candidate=wearable(ctx,id,"Accessory")
         local function accessoryKind(object)
             local ok,kind=pcall(function()return object.AccessoryType.Name end)
-            return ok and kind~="Unknown" and kind or "Hat"
+            return ok and kind~="Unknown" and kind or object:IsA("Hat")and "Hat"or nil
         end
         local kind=accessoryKinds[assetType] or settings.accessoryKinds[tostring(id)] or accessoryKind(candidate)
+        if not kind then
+            local ok,info=pcall(function()return game:GetService("MarketplaceService"):GetProductInfoAsync(id,Enum.InfoType.Asset)end)
+            if not valid(ctx)then candidate:Destroy();check(ctx)end
+            kind=ok and type(info)=="table"and accessoryKinds[info.AssetTypeId]or nil
+        end
+        if not kind then candidate:Destroy();error("Could not identify this accessory's catalog category; game appearance was preserved.")end
+        -- Raw catalog decoding can leave AccessoryType Unknown. Native avatar
+        -- generation omits that entry, which would falsely reject an allowed hat.
+        -- Resolve its catalog category before admission, fitting and mapping.
+        if candidate:IsA("Accessory")and candidate.AccessoryType==Enum.AccessoryType.Unknown then
+            candidate.AccessoryType=Enum.AccessoryType[kind]
+        end
         local count=0
         for _,entry in ipairs(added)do if (entry.kind or accessoryKind(entry.object))==kind then count=count+1 end end
         if count>=20 then candidate:Destroy();error("You can wear at most 20 "..kind.." accessories at once.")end
@@ -949,6 +961,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics,createMappi
             candidate:Destroy()
             if not reapplying then
                 if not table.find(settings.accessories,id)then table.insert(settings.accessories,id)end
+                settings.accessoryKinds[tostring(id)]=kind
                 settings.accessoryMeta=settings.accessoryMeta or {};settings.accessoryMeta[tostring(id)]=meta;save()
             end
             return "Accessory selection saved; this game's avatar settings exclude it."

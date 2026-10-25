@@ -23,8 +23,12 @@ Disable and destroy restore only owned writes and remove owned additions.
 
 `lune run tests/run_appearance_mapping.luau` covers initial native restrictions,
 property and instance changes, extension revisions, original restoration,
-respawn, cloned body effects, clothing, disable and reload. The same four suites
+respawn, cloned body effects, clothing, disable and reload. These suites
 also pass using real Roblox instances and events in the connected client.
+The accessory admission suite also checks raw catalog items whose
+`AccessoryType` is `Unknown`: resolve the category from supplied catalog
+metadata, saved catalog category, or MarketplaceService before native admission.
+An unknown category must not be mistaken for an experience restriction.
 Generated-root and verification-event regressions pass separately.
 
 Live RIVALS verification confirms the replacement leg uses the experience's
