@@ -18,5 +18,6 @@ return function(source)
     assert(not full(image("AvatarImage","rbxthumb://type=AvatarHeadShot&id=456")),"explicit peer headshot uses same camera")
     assert(full(image("AvatarImage","https://tr.rbxcdn.com/opaque.png",{Name="CardContent"})),"square People card keeps full body")
     assert(full(image("AvatarImage","https://tr.rbxcdn.com/body.png")),"ordinary full-body slot stays full body")
+    assert(not full(image("Icon","https://www.roblox.com/headshot-thumbnail/image?userId=123&width=420")),"legacy game headshot URLs retain headshot framing")
     print("PASS: own/peer round portraits use headshot; square full-body slots preserved")
 end

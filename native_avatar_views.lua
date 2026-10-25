@@ -76,8 +76,9 @@ local function ownThumbnailUrl(image, player)
     local robloxHost = host and (host == "roblox.com" or host:match("%.roblox%.com$") or host:match("%.rbxcdn%.com$"))
     if not robloxHost then return false end
     local bust = lower:match("/bust%-thumbnail/image%?") ~= nil
+    local headshot = lower:match("/headshot%-thumbnail/image%?") ~= nil
     local avatar = lower:match("/thumbs/avatar%.ashx%?") ~= nil
-    if not bust and not avatar then return false end
+    if not bust and not headshot and not avatar then return false end
     return lower:match("[?&]userid=" .. id .. "[&]" ) ~= nil
         or lower:match("[?&]userid=" .. id .. "$") ~= nil
 end
@@ -416,7 +417,7 @@ function M.create(player, getPreviews, describeSnapshot)
     local function fullPortrait(image)
         local source=tostring(nativeImageSources[image] or read(image,"Image") or ""):lower()
         if source:find("avatarheadshot",1,true) or source:find("avatarbust",1,true)
-            or source:find("bust-thumbnail",1,true) then return false end
+            or source:find("bust-thumbnail",1,true) or source:find("headshot-thumbnail",1,true) then return false end
         -- CDN URLs omit the thumbnail kind. Use the native portrait slot too,
         -- so peers and our own avatar share the same headshot camera.
         local name=tostring(read(image,"Name") or ""):lower()
@@ -703,13 +704,12 @@ function M.create(player, getPreviews, describeSnapshot)
         if class ~= "ImageLabel" and class ~= "ImageButton" then return false end
         local name = tostring(read(object, "Name") or ""):lower()
         if name == "avatar" or name == "avatarimage" or name == "headshot" or name == "avatarthumbnail" or name == "thumbnail" or name == "charactericon" then return true end
-        if name == "icon" then
-            local parent, grandparent = read(object, "Parent"), read(read(object, "Parent"), "Parent")
-            return tostring(read(parent, "Name") or ""):lower() == "profile"
-                and tostring(read(grandparent, "Name") or ""):lower() == "nav"
-        end
+        -- Games often parent an empty Icon before assigning its thumbnail.
+        -- Observe its Image, but only replace an explicit avatar identity match.
+        if name == "icon" then return true end
         local image = tostring(nativeImageSources[object] or read(object, "Image") or ""):lower()
         return image:match("^rbxthumb://") ~= nil or image:find("/bust-thumbnail/image?", 1, true) ~= nil
+            or image:find("/headshot-thumbnail/image?", 1, true) ~= nil
             or image:find("/thumbs/avatar.ashx?", 1, true) ~= nil
     end
     local function scan()
@@ -725,7 +725,7 @@ function M.create(player, getPreviews, describeSnapshot)
     watch=function(object)
         if not watchableImage(object) then return end
         imageCandidates[object]=true
-        if not geometryConnections[object] then
+        if not geometryConnections[object] and isAvatarImage(object,player,{name=currentName}) then
             local group={}
             geometryConnections[object]=group
             local function changed() if alive and enabled then updateGeometry(object) end end
@@ -750,7 +750,7 @@ function M.create(player, getPreviews, describeSnapshot)
                         nativeImageSources[object]=read(object,"Image")
                         overlayKeys[object]=nil
                     end
-                    if isAvatarImage(object, player, {name = currentName}) then render(object)
+                    if isAvatarImage(object, player, {name = currentName}) then watch(object);render(object)
                     else destroyOverlay(object) end
                 end) end)
                 if connected and connection then connections[object] = connection end
