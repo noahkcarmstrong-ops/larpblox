@@ -76,6 +76,7 @@ local function uniquePeopleRow(object, player, options)
     return false
 end
 
+local nativeImageSources=setmetatable({}, {__mode="k"})
 local function thumbnailUserId(image)
     local lower = image:lower()
     local kind=lower:match("^rbxthumb://type=([^&]+)")or lower:match("[?&]type=([^&]+)")
@@ -134,7 +135,7 @@ local function isAvatarImage(object, player, options)
     local name = tostring(read(object, "Name") or ""):lower()
     local namedThumbnail = name == "avatar" or name == "avatarimage" or name == "headshot"
         or name == "avatarthumbnail" or name == "thumbnail"
-    local explicit=thumbnailUserId(tostring(read(object,"Image")or ""))
+    local explicit=thumbnailUserId(tostring(nativeImageSources[object]or read(object,"Image")or ""))
     -- An explicit foreign thumbnail must not fall through to text matching
     -- while React is reusing a card or has not inserted its labels yet.
     if explicit then return explicit==tostring(read(player,"UserId")or "")end
@@ -220,15 +221,18 @@ function M.create(player, getPreviews, describeSnapshot)
     local ownerKey=tostring(read(player,"UserId"))
     local previousOwner=rendererOwners[ownerKey]
     if previousOwner and type(previousOwner.destroy)=="function" then pcall(previousOwner.destroy) end
-    local alive, enabled, currentName, currentDisplayName, verified, previewSnapshot, effectiveKey = true, false, "", "", false, nil, nil
+    local alive, enabled, currentName, currentDisplayName, verified, currentImage, previewSnapshot, effectiveKey = true, false, "", "", false, nil, nil, nil
     local overlays, overlayKeys, hiddenImages, connections, scanCount, renderedCount = {}, {}, {}, {}, 0, 0
     local transparencyConnections,backgroundConnections,textConnections,geometryConnections={},{},{},{}
     local pending = {}
+    local directImages={}
     local ownedOverlays={}
+    local failedImages={}
     local verificationBadges={}
     local verificationGeometry={}
     local renderingVerification=false
     local verificationCharacterConnections={}
+    local stagingFolder
     local outfitSnapshot,outfitKey,previewBuild,previewKey
     local ensurePreview
     local imageCandidates=setmetatable({}, {__mode="k"})
@@ -394,9 +398,16 @@ function M.create(player, getPreviews, describeSnapshot)
         for image in pairs(hiddenImages) do restoreImage(image) end
     end
     local function destroyOverlay(image, restore)
+        if directImages[image] then
+            directImages[image]=nil
+            local source=nativeImageSources[image]
+            nativeImageSources[image]=nil
+            if source then pcall(function() image.Image=source end) end
+        end
         local staged = pending[image]
         if staged then
             pending[image] = nil
+            if staged.connection then staged.connection:Disconnect() end
             pcall(function() staged.overlay:Destroy() end)
         end
         local overlay = overlays[image]
@@ -409,7 +420,7 @@ function M.create(player, getPreviews, describeSnapshot)
         LeftUpperArm=true,LeftLowerArm=true,LeftHand=true,RightUpperArm=true,RightLowerArm=true,RightHand=true,
         LeftUpperLeg=true,LeftLowerLeg=true,LeftFoot=true,RightUpperLeg=true,RightLowerLeg=true,RightFoot=true}
     local function fullPortrait(image)
-        local source=tostring(read(image,"Image") or ""):lower()
+        local source=tostring(nativeImageSources[image] or read(image,"Image") or ""):lower()
         if source:find("avatarheadshot",1,true) or source:find("avatarbust",1,true)
             or source:find("bust-thumbnail",1,true) or source:find("headshot-thumbnail",1,true) then return false end
         -- CDN URLs omit the thumbnail kind. Use the native portrait slot too,
@@ -515,8 +526,9 @@ function M.create(player, getPreviews, describeSnapshot)
             if viewport then frameCamera(viewport,image) end
         end
     end
-    local function makeOverlay(image)
-        local overlay = Instance.new("CanvasGroup")
+    local function makeOverlay(image, imageSource)
+        local class = imageSource and "ImageLabel" or "CanvasGroup"
+        local overlay = Instance.new(class)
         ownedOverlays[overlay]=true
         overlay.Destroying:Connect(function() ownedOverlays[overlay]=nil end)
         overlay.Name = "LarpbloxOwnAvatarPreview"
@@ -526,10 +538,13 @@ function M.create(player, getPreviews, describeSnapshot)
         overlay.ClipsDescendants = true
         overlay.Visible = false
         overlay.ZIndex = read(image, "ZIndex") or 1
-        local viewport=Instance.new("ViewportFrame")
-        viewport.Name="Viewport";viewport.Size=UDim2.fromScale(1,1)
-        viewport.BackgroundTransparency=1;viewport.BorderSizePixel=0
-        viewport.ZIndex=overlay.ZIndex;viewport.Parent=overlay
+        if imageSource then overlay.Image = imageSource;overlay.ScaleType=read(image,"ScaleType") or Enum.ScaleType.Fit end
+        if not imageSource then
+            local viewport=Instance.new("ViewportFrame")
+            viewport.Name="Viewport";viewport.Size=UDim2.fromScale(1,1)
+            viewport.BackgroundTransparency=1;viewport.BorderSizePixel=0
+            viewport.ZIndex=overlay.ZIndex;viewport.Parent=overlay
+        end
         return overlay
     end
     local render
@@ -569,7 +584,11 @@ function M.create(player, getPreviews, describeSnapshot)
     render=function(image)
         watchVisibility(image)
         if not visibleImage(image)then return end
-        if not previewSnapshot then ensurePreview();return end
+        if fullPortrait(image)and not currentImage then
+            destroyOverlay(image);status="Waiting for the Roblox-rendered avatar image.";return
+        end
+        if not previewSnapshot and not currentImage then ensurePreview();return end
+        if directImages[image] and overlayKeys[image]==effectiveKey then return end
         local existing=overlays[image]
         if existing and read(existing,"Parent")~=image then
             overlays[image]=nil;overlayKeys[image]=nil;restoreImage(image)
@@ -578,19 +597,32 @@ function M.create(player, getPreviews, describeSnapshot)
         if staged and staged.key == effectiveKey then return end
         if staged then
             pending[image]=nil
+            if staged.connection then staged.connection:Disconnect() end
             staged.overlay:Destroy()
         end
-        -- Every subject uses the same saved-outfit renderer. Native slot kind
-        -- selects full-body/headshot framing, never a different image pipeline.
-        local snapshot=previewSnapshot
-        if previewKey~=outfitKey then ensurePreview();return end
-        local overlay = makeOverlay(image)
+        -- Native full-body slots use the Roblox-rendered PNG. Headshots need
+        -- a distinct crop/render, so never squeeze a full-body image into them.
+        local imageSource, snapshot = fullPortrait(image) and currentImage and not failedImages[currentImage] and currentImage or nil, previewSnapshot
+        if fullPortrait(image)and not imageSource then
+            destroyOverlay(image);status="Waiting for the Roblox-rendered avatar image.";return
+        end
+        if not imageSource and (not snapshot or previewKey~=outfitKey) then ensurePreview();return end
+        local overlay = makeOverlay(image, imageSource)
+        if imageSource then
+            -- Keep preload images outside the styled native GUI. Image children
+            -- can alter the intrinsic size used by Roblox's automatic layout.
+            if not stagingFolder then
+                stagingFolder=Instance.new("Folder")
+                stagingFolder.Name="LarpbloxPortraitPreloads"
+                stagingFolder.Parent=coreGui or playerGui
+            end
+        end
         staged = {key=effectiveKey, overlay=overlay}
         pending[image] = staged
         -- Reused game UI can remove our child without destroying the ImageLabel.
         -- Drop the stale cache entry and reveal the original before rebuilding.
         overlay.AncestryChanged:Connect(function(_,parent)
-            if parent==image then return end
+            if parent==image or (imageSource and parent==stagingFolder) then return end
             local lost=false
             if overlays[image]==overlay then
                 overlays[image]=nil;overlayKeys[image]=nil
@@ -604,9 +636,9 @@ function M.create(player, getPreviews, describeSnapshot)
                 end)
             end
         end)
-        -- Publish ownership before parenting can trigger native layout events.
-        overlay.Parent=image
+        overlay.Parent=imageSource and stagingFolder or image
         local function discard()
+            if staged.connection then staged.connection:Disconnect(); staged.connection=nil end
             if pending[image]==staged then pending[image]=nil end
             pcall(function() overlay:Destroy() end)
         end
@@ -615,10 +647,27 @@ function M.create(player, getPreviews, describeSnapshot)
                 or not isAvatarImage(image,player,{name=currentName}) then discard();return end
             local previous=overlays[image]
             pending[image]=nil
+            if staged.connection then staged.connection:Disconnect();staged.connection=nil end
+            if imageSource then
+                nativeImageSources[image]=nativeImageSources[image] or read(image,"Image")
+                directImages[image]=imageSource
+                overlayKeys[image]=staged.key;overlays[image]=nil
+                restoreImage(image)
+                image.Image=imageSource
+                overlay:Destroy()
+                if previous then previous:Destroy() end
+                renderedCount=renderedCount+1
+                return
+            end
+            if directImages[image] then
+                directImages[image]=nil
+                local source=nativeImageSources[image];nativeImageSources[image]=nil
+                if source then image.Image=source end
+            end
             -- Roblox can clone/reuse a thumbnail carrying an old preview child.
             -- Such copies are outside our ownership tables and must not stack.
             for _,child in ipairs(image:GetChildren())do
-                if child~=overlay and child~=previous and child.Name=="LarpbloxOwnAvatarPreview"then
+                if child~=overlay and child~=previous and child.Name=="LarpbloxOwnAvatarPreview" then
                     if ownedOverlays[child]or not attr(child,"LarpbloxPortraitUserId")then child:Destroy()end
                 end
             end
@@ -628,6 +677,29 @@ function M.create(player, getPreviews, describeSnapshot)
             hideImage(image);overlay.Visible=true
             if previous then previous:Destroy() end
             renderedCount=renderedCount+1
+        end
+        if imageSource then
+            matchPortraitMask(image,overlay)
+            staged.connection=overlay:GetPropertyChangedSignal("IsLoaded"):Connect(function()
+                if overlay.IsLoaded then commit() end
+            end)
+            if overlay.IsLoaded then commit() end
+            task.spawn(function()
+                local loaded=false
+                local ok=pcall(function()
+                    game:GetService("ContentProvider"):PreloadAsync({overlay},function(_,result)
+                        if result==Enum.AssetFetchStatus.Success then loaded=true end
+                    end)
+                end)
+                if pending[image]~=staged then return end
+                if ok and (loaded or overlay.IsLoaded)then commit()
+                else
+                    failedImages[imageSource]=true
+                    discard()
+                    if alive and enabled then render(image)end
+                end
+            end)
+            return
         end
         local ok, previews = pcall(getPreviews)
         if not ok or not previews or type(previews.show) ~= "function" then status = "Preview renderer unavailable.";discard();return end
@@ -649,7 +721,7 @@ function M.create(player, getPreviews, describeSnapshot)
         -- Games often parent an empty Icon before assigning its thumbnail.
         -- Observe its Image, but only replace an explicit avatar identity match.
         if name == "icon" then return true end
-        local image = tostring(read(object, "Image") or ""):lower()
+        local image = tostring(nativeImageSources[object] or read(object, "Image") or ""):lower()
         return image:match("^rbxthumb://") ~= nil or image:find("/bust-thumbnail/image?", 1, true) ~= nil
             or image:find("/headshot-thumbnail/image?", 1, true) ~= nil
             or image:find("/thumbs/avatar.ashx?", 1, true) ~= nil
@@ -662,6 +734,7 @@ function M.create(player, getPreviews, describeSnapshot)
             if isAvatarImage(object, player, {name = currentName}) then seen[object] = true;if watch then watch(object)end;render(object) end
         end
         for image in pairs(hiddenImages) do if not seen[image] then destroyOverlay(image) end end
+        for image in pairs(directImages) do if not seen[image] then destroyOverlay(image) end end
     end
     watch=function(object)
         if not watchableImage(object) then return end
@@ -687,6 +760,10 @@ function M.create(player, getPreviews, describeSnapshot)
                 local connection
                 local connected = pcall(function() connection = signal:Connect(function()
                     if not alive or not enabled then return end
+                    if directImages[object] and read(object,"Image")~=directImages[object] then
+                        nativeImageSources[object]=read(object,"Image")
+                        overlayKeys[object]=nil
+                    end
                     if isAvatarImage(object, player, {name = currentName}) then watch(object);render(object)
                     else destroyOverlay(object) end
                 end) end)
@@ -743,7 +820,7 @@ function M.create(player, getPreviews, describeSnapshot)
             for image in pairs(imageCandidates) do
                 if image:IsDescendantOf(scope) then
                     if isAvatarImage(image, player, {name = currentName}) then watch(image); render(image)
-                    elseif hiddenImages[image]or pending[image]then destroyOverlay(image) end
+                    elseif hiddenImages[image]or directImages[image]or pending[image]then destroyOverlay(image) end
                 end
             end
             if verified then queueVerification(object) end
@@ -776,7 +853,7 @@ function M.create(player, getPreviews, describeSnapshot)
             pcall(function()connections["removed"..index]=root.DescendantRemoving:Connect(function(object)
                 imageCandidates[object]=nil
                 releaseVisibility(object)
-                if overlays[object] or hiddenImages[object] or pending[object] then destroyOverlay(object)end
+                if overlays[object] or directImages[object] or hiddenImages[object] or pending[object] then destroyOverlay(object)end
                 if geometryConnections[object] then
                     for _,connection in ipairs(geometryConnections[object]) do connection:Disconnect() end
                     geometryConnections[object]=nil
@@ -819,11 +896,12 @@ function M.create(player, getPreviews, describeSnapshot)
         enabled = options.enabled == true; currentName = tostring(options.name or "")
         currentDisplayName=tostring(options.displayName or "")
         verified=options.verified==true
+        currentImage = type(options.image)=="string" and options.image~="" and options.image or nil
         local effectiveSnapshot = options.snapshot
         outfitSnapshot=effectiveSnapshot
         outfitKey=appearanceSignature(effectiveSnapshot)
-        local nextKey = outfitKey
-        if enabled and wasEnabled and previousName==currentName and nextKey==effectiveKey and previewSnapshot then
+        local nextKey = outfitKey .. "|" .. tostring(currentImage or "")
+        if enabled and wasEnabled and previousName==currentName and nextKey==effectiveKey and (currentImage or previewSnapshot) then
             if previousDisplayName~=currentDisplayName or previousVerified~=verified then renderVerification()end
             return api.report()
         end
@@ -836,13 +914,14 @@ function M.create(player, getPreviews, describeSnapshot)
             for _, object in ipairs(preflight) do watch(object); watchPeopleText(object) end
             indexed=true
         end
-        if enabled and effectiveSnapshot == nil then
+        if enabled and effectiveSnapshot == nil and not currentImage then
             renderVerification();status="Waiting for avatar data.";return api.report()
         end
         effectiveKey = nextKey
         if not enabled then
             for image in pairs(visibilityConnections)do releaseVisibility(image)end
             previewSnapshot = nil;previewKey=nil;previewBuild=nil
+            for image in pairs(directImages) do destroyOverlay(image) end
             for image in pairs(overlays) do destroyOverlay(image) end
             for image in pairs(pending) do destroyOverlay(image) end
             restoreAllImages();clearVerification()
@@ -871,6 +950,7 @@ function M.create(player, getPreviews, describeSnapshot)
         connections = {};transparencyConnections={};backgroundConnections={};textConnections={};geometryConnections={}
         for _,connection in ipairs(verificationCharacterConnections) do pcall(function() connection:Disconnect() end) end
         verificationCharacterConnections={}
+        for image in pairs(directImages) do pcall(destroyOverlay,image) end
         for image in pairs(overlays) do pcall(destroyOverlay,image) end
         for image in pairs(pending) do pcall(destroyOverlay,image) end
         -- The ownership set also catches previews no longer referenced by a slot
@@ -879,6 +959,7 @@ function M.create(player, getPreviews, describeSnapshot)
         ownedOverlays={}
         for image in pairs(hiddenImages) do pcall(restoreImage,image) end
         clearVerification()
+        if stagingFolder then pcall(function() stagingFolder:Destroy() end);stagingFolder=nil end
     end
     rendererOwners[ownerKey]=api
     return api

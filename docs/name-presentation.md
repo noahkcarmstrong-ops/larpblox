@@ -25,23 +25,19 @@ Existing native lists can retain cached state until their next game refresh.
 
 ## Native avatar portraits
 
-Local and shared subjects use the same saved-outfit viewport renderer, including
-lighting, full-body/headshot framing, masks and transparent backing. Native
-Roblox model generation still supplies the outfit geometry. Downloaded images
-do not select a second rendering path, and shared presentation no longer
-downloads image files. Captured outfit data is cached until its appearance
-signature changes; there is no polling or frame scan.
+Full-body cards use the finished Roblox-rendered PNG in the native Image slot.
+Local and shared images take this same path. A missing full-body image retains
+Roblox's native thumbnail until a matching finished image is supplied; it never
+switches to the lower-quality model preview. Headshot slots retain their distinct
+framing. Shared image downloads are validated PNGs from permitted Roblox CDNs.
 
 Explicit avatar thumbnail IDs veto conflicting text fallback. An opaque People
 thumbnail resolves only within a single card; blank or truncated foreign labels
 cannot borrow a sibling's identity. Preview ownership is registered before
-parenting can trigger reentrant layout events. While a preview is visible, its
-native image and opaque backing are masked; disable, card reuse and cleanup
-restore the latest authored transparency values.
+parenting can trigger reentrant layout events. Disable, card reuse and cleanup
+restore authored image sources and the latest transparency values.
 
 `lune run tests/run_portrait_ownership.luau` covers card isolation, conflicting
-thumbnail IDs, truncated/incomplete labels, reentrant creation, one shared
-rendering path, background updates, disable and card reuse. It also passes with
-real Roblox instances. Live Escape-menu inspection confirmed one preview per
-mapped card, matching lighting/camera settings for both subjects, and the
-unmapped neighboring card's original avatar.
+thumbnail IDs, truncated/incomplete labels, reentrant creation, native PNG
+assignment, missing-image behavior, backing updates, disable and card reuse.
+It also passes with real Roblox instances.

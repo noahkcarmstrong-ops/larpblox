@@ -14,7 +14,7 @@ return function(source)
             local label=Instance.new("TextLabel");label.Text=username;label.Parent=row
             return image,label,row
         end
-        local image,label=card("@Alias","rbxthumb://type=Avatar&id=123&w=150&h=150")
+        local image,label=card("@Alias","rbxthumb://type=AvatarHeadShot&id=123&w=150&h=150")
         local foreign,foreignLabel=card("@Other...","rbxthumb://type=Avatar&id=456&w=150&h=150")
         local blank,blankLabel=card("","")
         local event=own(Instance.new("BindableEvent"))
@@ -22,6 +22,9 @@ return function(source)
         local env=setmetatable({game={GetService=function(_,name)
             if name=="CoreGui"then return root end
             if name=="Players"then return {LocalPlayer=player}end
+            if name=="ContentProvider"then return {PreloadAsync=function(_,objects,callback)
+                for _ in ipairs(objects)do callback("portrait",Enum.AssetFetchStatus.Success)end
+            end}end
         end},getgenv=false},{__index=getfenv()})
         local chunk=assert(loadstring(source));setfenv(chunk,env);local module=chunk()
         assert(module.isAvatarImage(image,player,{name="Alias"}),"explicit own avatar matches")
@@ -55,24 +58,6 @@ return function(source)
         end
         assert(overlays()==1,"reentrant native layout events cannot stack portrait previews")
         assert(image.ImageTransparency==1 and image.BackgroundTransparency==1,"transparent preview masks both native image and opaque backing")
-        local nativeImage=image.Image
-        local beforeImage=api.report()
-        api.update({enabled=true,name="Alias",snapshot=snapshot(2),image="rbxassetid://downloaded-local-portrait"})
-        assert(api.report()==beforeImage,"downloaded-image changes do not rebuild a cached saved-outfit portrait")
-        foreign.Image="rbxthumb://type=Avatar&id=456&w=150&h=150";foreignLabel.Text="@Peer"
-        local peer={Name="Other",UserId=456,CharacterAdded=event.Event,FindFirstChildOfClass=function()end}
-        local peerApi=own(module.create(peer,function()return previews end,function()return Instance.new("HumanoidDescription")end),"destroy")
-        peerApi.update({enabled=true,name="Peer",snapshot=snapshot(2)})
-        task.wait();task.wait()
-        local ownOverlay=image:FindFirstChild("LarpbloxOwnAvatarPreview")
-        local peerOverlay=foreign:FindFirstChild("LarpbloxOwnAvatarPreview")
-        assert(image.Image==nativeImage and ownOverlay.ClassName=="CanvasGroup"and peerOverlay.ClassName=="CanvasGroup",
-            "local image availability never switches local and peer portraits onto different rendering paths")
-        for _,overlay in ipairs({ownOverlay,peerOverlay})do
-            local viewport=overlay:FindFirstChild("Viewport")
-            assert(viewport and viewport.BackgroundTransparency==1 and overlay.BackgroundTransparency==1,"both subjects use the same transparent viewport surface")
-        end
-        peerApi.destroy()
         image.BackgroundTransparency=0.4;task.wait();task.wait()
         assert(image.BackgroundTransparency==1,"native backing updates remain masked during preview")
         api.update({enabled=false});task.wait();task.wait()
@@ -80,6 +65,19 @@ return function(source)
         api.update({enabled=true,name="Alias",snapshot=snapshot(2)});task.wait();task.wait()
         image.Image="rbxthumb://type=Avatar&id=456&w=150&h=150";task.wait();task.wait()
         assert(overlays()==0 and image.ImageTransparency==0.25 and math.abs(image.BackgroundTransparency-0.4)<0.0001,"recycled card releases old portrait ownership")
+        api.destroy()
+        image.Image="rbxthumb://type=Avatar&id=123&w=150&h=150"
+        local calls=0
+        local nativeApi=own(module.create(player,function()calls=calls+1;return previews end,function()return Instance.new("HumanoidDescription")end),"destroy")
+        nativeApi.update({enabled=true,name="Alias",snapshot=snapshot(2)})
+        task.wait();task.wait()
+        assert(overlays()==0 and calls==0,"missing full-body PNG never switches to a low-quality model")
+        local original=image.Image
+        nativeApi.update({enabled=true,name="Alias",snapshot=snapshot(2),image="rbxasset://textures/ui/GuiImagePlaceholder.png"})
+        task.wait();task.wait()
+        assert(image.Image=="rbxasset://textures/ui/GuiImagePlaceholder.png"and overlays()==0 and calls==0,"finished native image uses the native image slot without a model overlay")
+        nativeApi.update({enabled=false});task.wait();task.wait()
+        assert(image.Image==original,"disable restores the native thumbnail source")
         return "PASS: exact portrait identity, sibling isolation, truncated labels, atomic preview ownership, transparent backing and restoration"
     end)
     for i=#cleanup,1,-1 do pcall(cleanup[i])end
