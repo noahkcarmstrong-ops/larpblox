@@ -5,42 +5,24 @@ return function(getSource,log,isEnabled)
     local bodies={}
     local sources={}
     local playerConnections={}
-    local provenance=setmetatable({}, {__mode="k"})
+    local markers=setmetatable({}, {__mode="k"})
+    local function mark(character,userId)
+        if not markers[character]then markers[character]={previous=character:GetAttribute("LarpbloxSourceUserId"),written=userId}end
+        character:SetAttribute("LarpbloxSourceUserId",userId)
+    end
     local function track(player)
-        if player.Character then provenance[player.Character]=player.UserId end
-        playerConnections[#playerConnections+1]=player.CharacterAdded:Connect(function(character)provenance[character]=player.UserId end)
+        if player.Character then mark(player.Character,player.UserId)end
+        playerConnections[#playerConnections+1]=player.CharacterAdded:Connect(function(character)mark(character,player.UserId)end)
     end
     for _,player in ipairs(Players:GetPlayers())do track(player)end
     playerConnections[#playerConnections+1]=Players.PlayerAdded:Connect(track)
-    -- Reuse a single targeted Clone hook across reloads. Only tracked character
-    -- roots receive provenance; unrelated clones take the original path.
-    local hookState
-    if type(getgenv)=="function" and type(hookfunction)=="function"then
-        local environment=getgenv()
-        hookState=environment.__LarpbloxCorpseCloneHook
-        if not hookState then
-            local state={}
-            local original
-            local function clone(instance,...)
-                local result=original(instance,...)
-                local id=state.sources and state.sources[instance]
-                if id and result then
-                    pcall(function()result:SetAttribute("LarpbloxSourceUserId",id)end)
-                end
-                return result
-            end
-            local ok,previous=pcall(hookfunction,game.Clone,type(newcclosure)=="function" and newcclosure(clone) or clone)
-            if ok and type(previous)=="function"then original=previous;hookState=state;environment.__LarpbloxCorpseCloneHook=state end
-        end
-        if hookState then hookState.sources=provenance end
-    end
     local bodyNames={Head=true,Torso=true,["Left Arm"]=true,["Right Arm"]=true,["Left Leg"]=true,["Right Leg"]=true,
         UpperTorso=true,LowerTorso=true,LeftUpperArm=true,LeftLowerArm=true,LeftHand=true,RightUpperArm=true,RightLowerArm=true,RightHand=true,
         LeftUpperLeg=true,LeftLowerLeg=true,LeftFoot=true,RightUpperLeg=true,RightLowerLeg=true,RightFoot=true}
     local visual={SpecialMesh=true,Decal=true,Texture=true,SurfaceAppearance=true}
     local function emit(event,data)if log then log(event,data)end end
     local function owner(model)
-        local id=model:GetAttribute("LarpbloxSourceUserId") or model:GetAttribute("UserId") or model:GetAttribute("PlayerId")
+        local id=model:GetAttribute("LarpbloxSourceUserId") or model:GetAttribute("LarpbloxAppearanceUserId") or model:GetAttribute("UserId") or model:GetAttribute("PlayerId")
         if tonumber(id)then return Players:GetPlayerByUserId(tonumber(id))end
         local value=model:FindFirstChild("PlayerName") or model:FindFirstChild("Player")
         if value and value:IsA("ObjectValue") and value.Value and value.Value:IsA("Player")then return value.Value end
@@ -70,6 +52,11 @@ return function(getSource,log,isEnabled)
         if previous and not refresh then return previous end
         local source=getSource(id)
         if not source then return previous end
+        if source.mapped then
+            discardSource(id)
+            local mapped={character=source.character,origin=source.character,version=source.version,mapped=true,attach=source.attach,resources={},connections={}}
+            sources[id]=mapped;return mapped
+        end
         if previous and not force and previous.origin==source.character and previous.version==source.version then return previous end
         local model=Instance.new("Model")
         local frozen={character=model,origin=source.character,version=source.version,
@@ -195,6 +182,12 @@ return function(getSource,log,isEnabled)
         record.userId=player.UserId
         local source=sourceFor(player.UserId)
         if not source or source.character==model then return end
+        if source.mapped then
+            -- The mapping adopts the body's actual state. Never repaint it from
+            -- a frozen saved outfit, which would erase game/death changes.
+            record.applied=source.attach(model)or record.applied
+            return
+        end
         local head=model:FindFirstChild("Head")
         if not head or not head:IsA("BasePart")then return end
         -- Death systems may remove the Humanoid; an explicit owner and matching rig suffice.
@@ -324,7 +317,7 @@ return function(getSource,log,isEnabled)
     end,destroy=function()
         alive=false;added:Disconnect()
         for _,connection in ipairs(playerConnections)do connection:Disconnect()end
-        if hookState and hookState.sources==provenance then hookState.sources=nil end
+        for character,marker in pairs(markers)do pcall(function()if character:GetAttribute("LarpbloxSourceUserId")==marker.written then character:SetAttribute("LarpbloxSourceUserId",marker.previous)end end)end
         for _,record in pairs(bodies)do
             restore(record)
             record.removed:Disconnect()

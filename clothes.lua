@@ -30,7 +30,8 @@ local function dispose(roots)
     for _,root in ipairs(roots or {}) do if root then root:Destroy() end end
 end
 
-return function(player,onStatus,managedRespawn,readAsset)
+return function(player,onStatus,managedRespawn,readAsset,resolveNormalized)
+    local projectWrite,projectSource
     local gui=player:FindFirstChildOfClass("PlayerGui")
     local attribute="HoneyBunCosmeticClothes"
     local settings={}
@@ -110,6 +111,10 @@ return function(player,onStatus,managedRespawn,readAsset)
     end
     local function prepareOriginal(ctx,kind)
         if originals[kind]~=nil then return end
+        if resolveNormalized then
+            local expected,_,project,source=resolveNormalized(kind)
+            originals[kind]=expected;projectWrite=project or projectWrite;projectSource=source or projectSource;check(ctx);return
+        end
         -- The live character can use a game-applied outfit whose clothing IDs
         -- differ from the account description. Preserve that spawned baseline
         -- so later package swaps still recognize and remap the native slots.
@@ -127,9 +132,14 @@ return function(player,onStatus,managedRespawn,readAsset)
         assert(originals[kind]~=nil,"Could not identify your original clothing; existing game clothing was preserved.")
     end
     local function write(record,value)
-        if record.object[record.property]==value then record.written=value;return end
-        record.written=value
-        record.object[record.property]=value
+        if projectWrite then
+            record.written=value
+            projectWrite(record.object,record.property,record.source,originals[record.kind],replacements[record.kind],value,record.synthetic)
+            record.written=record.object[record.property]
+        else
+            if record.object[record.property]==value then record.written=value;return end
+            record.written=value;record.object[record.property]=value
+        end
     end
     local function forget(view,object,restore)
         local record=view.records[object]
@@ -152,7 +162,7 @@ return function(player,onStatus,managedRespawn,readAsset)
             local value=object[record.property]
             if value==record.written then return end
             -- The new external value is the source state, regardless of why it changed.
-            record.source=value;record.written=value;record.synthetic=false
+            record.source=projectSource and projectSource(object,record.property)or value;record.written=value;record.synthetic=false
             schedule(view,record.kind)
         end)
         record.connections[2]=object.AncestryChanged:Connect(function()
@@ -183,7 +193,7 @@ return function(player,onStatus,managedRespawn,readAsset)
         for object,record in pairs(view.records)do
             if record.kind==kind and object.Parent==view.character then
                 local current=object[record.property]
-                if current~=record.written then record.source=current;record.written=current;record.synthetic=false;hasNative=true end
+                if current~=record.written then record.source=projectSource and projectSource(object,record.property)or current;record.written=current;record.synthetic=false;hasNative=true end
                 if record.synthetic then synthetic=object else hasNative=true end
                 local mapped=expected~=nil and content(record.source)==content(expected) and replacement~=nil
                 write(record,mapped and replacement or record.source)
@@ -243,7 +253,11 @@ return function(player,onStatus,managedRespawn,readAsset)
         local ctx=context()
         requests[kind]=(requests[kind] or 0)+1;local ticket=requests[kind]
         local template,id=resolveTemplate(ctx,kind,value)
-        prepareOriginal(ctx,kind);check(ctx)
+        if resolveNormalized then
+            local expected,replacement,project,source=resolveNormalized(kind,id)
+            originals[kind]=expected;template=replacement;projectWrite=project or projectWrite;projectSource=source or projectSource
+        else prepareOriginal(ctx,kind)end
+        check(ctx)
         assert(requests[kind]==ticket,"Clothing choice changed while loading.")
         settings[kind]=id;replacements[kind]=template;save();refresh(kind)
         return "Mapped classic "..string.lower(kind).." (visible to you)."
@@ -251,9 +265,14 @@ return function(player,onStatus,managedRespawn,readAsset)
     local function remove(kind)
         local ctx=context()
         requests[kind]=(requests[kind] or 0)+1;local ticket=requests[kind]
-        prepareOriginal(ctx,kind);check(ctx)
+        local template=""
+        if resolveNormalized then
+            local expected,replacement,project,source=resolveNormalized(kind,0)
+            originals[kind]=expected;template=replacement;projectWrite=project or projectWrite;projectSource=source or projectSource
+        else prepareOriginal(ctx,kind)end
+        check(ctx)
         assert(requests[kind]==ticket,"Clothing choice changed while loading.")
-        settings[kind]=0;replacements[kind]="";save();refresh(kind)
+        settings[kind]=0;replacements[kind]=template;save();refresh(kind)
         return "Removed original classic "..string.lower(kind).." locally."
     end
     local function restoreKind(kind,clearSaved)

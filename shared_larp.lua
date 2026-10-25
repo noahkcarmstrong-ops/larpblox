@@ -4,7 +4,6 @@ local HttpService=game:GetService("HttpService")
 local ACCESSORY_TYPES={[8]=true,[41]=true,[42]=true,[43]=true,[44]=true,[45]=true,[46]=true,[47]=true,[64]=true,[65]=true,[66]=true,[67]=true,[68]=true,[69]=true,[70]=true,[71]=true,[72]=true,[76]=true,[77]=true}
 local BODY_TYPES={[17]="Head",[27]="Torso",[28]="RightArm",[29]="LeftArm",[30]="LeftLeg",[31]="RightLeg",[79]="Head"}
 local BODY_REGIONS={"Head","Torso","RightArm","LeftArm","LeftLeg","RightLeg"}
-local SCALE_VALUES={height="BodyHeightScale",width="BodyWidthScale",depth="BodyDepthScale",head="HeadScale",bodyType="BodyTypeScale",proportion="BodyProportionScale"}
 local CLOTHES_TYPES={[2]="ShirtGraphic",[11]="Shirt",[12]="Pants"}
 local ANIMATION_TYPES={[48]=true,[50]=true,[51]=true,[52]=true,[53]=true,[54]=true,[55]=true,[56]=true,[78]=true}
 local COLOR_REGIONS={{"Head","headColor"},{"Torso","torsoColor"},{"LeftArm","leftArmColor"},{"RightArm","rightArmColor"},{"LeftLeg","leftLegColor"},{"RightLeg","rightLegColor"}}
@@ -70,9 +69,6 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         if not entry then return end
         peers[userId]=nil
         if entry.stopObserving then entry.stopObserving();entry.stopObserving=nil end
-        for value,original in pairs(entry.originalScales or {})do
-            pcall(function()if value.Parent then value.Value=original end end)
-        end
         if entry.hatScripts then pcall(entry.hatScripts.destroy)end
         for _,api in ipairs({entry.names,entry.animations,entry.clothes,entry.avatar,entry.views})do
             if api and api.destroy then pcall(api.destroy)end
@@ -87,9 +83,10 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         -- Other players' names are displayed in this client's GUI.
         pcall(function()playerGui=localPlayer:FindFirstChildOfClass("PlayerGui")end)
         local function callback(message)status("Shared appearance for "..player.Name..": "..tostring(message))end
+        local avatar=createAvatar(player,callback)
         return {
-            avatar=createAvatar(player,callback),
-            clothes=createClothes(player,callback),
+            avatar=avatar,
+            clothes=createClothes(player,callback,avatar.resolveClothes),
             animations=createAnimations(player,callback),
             names=createNames(player,playerGui),
             player=player,
@@ -162,116 +159,26 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         if entry.stopObserving then entry.stopObserving()end
         local character=entry.character
         if not character then return end
-        local connections,expected={},{}
         local active,queued=true,false
-        local function properties(object)
+        -- Appearance mappings own property changes. The only retry here is the
+        -- demonstrated readiness gap for accessories missing a body attachment.
+        local connection=character.DescendantAdded:Connect(function(object)
             local parent=object.Parent
-            if parent==character then
-                if object:IsA("BasePart") and object.Name~="HumanoidRootPart" then
-                    if object:IsA("MeshPart")then return {"Color","Size","Transparency","MeshId","TextureID"}end
-                    return {"Color","Size","Transparency"}
-                elseif object:IsA("Clothing") or object:IsA("ShirtGraphic")then return nil
-                elseif object:IsA("CharacterMesh")then return {"MeshId","BaseTextureId","OverlayTextureId"}
-                elseif object:IsA("BodyColors")then return {"HeadColor3","TorsoColor3","LeftArmColor3","RightArmColor3","LeftLegColor3","RightLegColor3"}
-                elseif object:IsA("Accessory") or object:IsA("Hat")then return {}end
-            elseif parent and parent.Parent==character and parent.Name=="Head"then
-                if object:IsA("Decal")then return {"Texture","Transparency"}
-                elseif object:IsA("SpecialMesh")then return {"MeshId","TextureId","Scale","Offset"}
-                elseif object:IsA("SurfaceAppearance")then return {"ColorMap"}end
-            end
-        end
-        local function changed()
-            if not active or queued then return end
+            if not object:IsA("Attachment")or not parent or not parent:IsA("BasePart")or parent.Parent~=character
+                or entry.accessoriesComplete~=false or queued then return end
             queued=true
             task.defer(function()
                 queued=false
-                if not active or not sharing or not isAlive() or peers[userId]~=entry
-                    or entry.player.Character~=character then return end
-                local dirty,accessoryOnly=false,true
-                local reason
-                local function mark(object,detail)
-                    dirty=true
-                    local accessory=object:IsA("Accessory") or object:IsA("Hat")
-                    if not accessory then accessoryOnly=false end
-                    reason=detail
-                end
-                for object,values in pairs(expected)do
-                    if not object:IsDescendantOf(character)then mark(object,object.ClassName.." "..object.Name.." removed")
-                    else for property,value in pairs(values)do
-                        if object[property]~=value then mark(object,object.Name.."."..property);break end
-                    end
-                    end
-                    if dirty and not accessoryOnly then break end
-                end
-                -- An accessory event can coincide with a body replacement.
-                -- Check both before deciding that only accessories need repair.
-                if accessoryOnly then
-                    for _,object in ipairs(character:GetChildren())do
-                        if properties(object) and not expected[object]then mark(object,object.ClassName.." added")end
-                        if dirty and not accessoryOnly then break end
-                    end
-                    local head=character:FindFirstChild("Head")
-                    if accessoryOnly and head then
-                        for _,object in ipairs(head:GetChildren())do
-                            if properties(object) and not expected[object]then mark(object,object.ClassName.." added");break end
-                        end
-                    end
-                end
-                if dirty then
-                    if accessoryOnly then
-                        entry.accessoriesComplete=false;entry.refreshAccessories=true
-                    else
-                        entry.snapshot=nil;entry.appearanceStarted=nil;entry.accessoriesComplete=nil
-                    end
-                    local record=latestRecords[userId]
-                    if record then
-                        diagnose(userId,"appearance_changed",reason)
-                        pending[userId]=record;processPending()
-                    end
+                if not active or not sharing or not isAlive()or peers[userId]~=entry
+                    or entry.player.Character~=character or entry.accessoriesComplete~=false then return end
+                local record=latestRecords[userId]
+                if record then
+                    diagnose(userId,"retry_accessories",object.Name)
+                    pending[userId]=record;processPending()
                 end
             end)
-        end
-        local function watch(object)
-            local fields=properties(object)
-            if not fields then return end
-            local values={};expected[object]=values
-            for _,property in ipairs(fields)do
-                local ok,value=pcall(function()return object[property]end)
-                if ok then
-                    values[property]=value
-                    connections[#connections+1]=object:GetPropertyChangedSignal(property):Connect(changed)
-                end
-            end
-        end
-        local attachmentRetryQueued=false
-        connections[#connections+1]=character.DescendantAdded:Connect(function(object)
-            if properties(object)then changed()end
-            local parent=object.Parent
-            if object:IsA("Attachment") and parent and parent:IsA("BasePart") and parent.Parent==character
-                and entry.accessoriesComplete==false and not attachmentRetryQueued then
-                attachmentRetryQueued=true
-                task.defer(function()
-                    attachmentRetryQueued=false
-                    if not active or not sharing or not isAlive() or peers[userId]~=entry
-                        or entry.player.Character~=character or entry.accessoriesComplete~=false then return end
-                    local record=latestRecords[userId]
-                    if record then
-                        diagnose(userId,"retry_accessories",object.Name)
-                        -- Retain the completed body/clothing state and existing
-                        -- accessories; applyRecord retries only missing items.
-                        pending[userId]=record;processPending()
-                    end
-                end)
-            end
         end)
-        connections[#connections+1]=character.DescendantRemoving:Connect(function(object)if expected[object]then changed()end end)
-        for _,object in ipairs(character:GetChildren())do watch(object)end
-        local head=character:FindFirstChild("Head")
-        if head then for _,object in ipairs(head:GetChildren())do watch(object)end end
-        entry.stopObserving=function()
-            active=false
-            for _,connection in ipairs(connections)do connection:Disconnect()end
-        end
+        entry.stopObserving=function()active=false;connection:Disconnect()end
     end
     local function refreshCharacter(entry,target)
         if entry.character==target.Character then return end
@@ -284,7 +191,6 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         entry.accessoriesComplete=nil
         entry.refreshAccessories=nil
         entry.animationAssets=nil
-        entry.originalScales=nil
     end
     local function appearanceReady(target,character)
         if not character or target.Character~=character then return false end
@@ -422,20 +328,10 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
                     if not current()then return end
                 end
             end
-            if humanoid and humanoid.RigType==Enum.HumanoidRigType.R15 then
-                entry.originalScales=entry.originalScales or {}
-                for key,property in pairs(SCALE_VALUES)do
-                    local scale=humanoid:FindFirstChild(property)
-                    local desired=(snapshot.definition.scales or {})[key]
-                    if scale and scale:IsA("NumberValue")then
-                        if desired~=nil then
-                            assert(type(desired)=="number" and desired==desired and desired>=0 and desired<=5,"Invalid shared body scale")
-                            if entry.originalScales[scale]==nil then entry.originalScales[scale]=scale.Value end
-                            if scale.Value~=desired then scale.Value=desired end
-                        elseif entry.originalScales[scale]~=nil then
-                            scale.Value=entry.originalScales[scale];entry.originalScales[scale]=nil
-                        end
-                    end
+            if humanoid and humanoid.RigType==Enum.HumanoidRigType.R15 and entry.avatar.setScales then
+                local values=snapshot.definition.scales or {}
+                if fresh or not sameValue(values,previous.definition and previous.definition.scales or {})then
+                    entry.avatar.setScales(values)
                 end
             end
             for _,item in ipairs(snapshot.items)do
@@ -479,13 +375,18 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
             if not wantedClothes.Shirt and (fresh or oldSlots[11])then pcall(entry.clothes.removeShirt)end
             if not wantedClothes.Pants and (fresh or oldSlots[12])then pcall(entry.clothes.removePants)end
             local colors=snapshot.definition.bodyColors or {}
+            local changedColors={}
             for _,pair in ipairs(COLOR_REGIONS)do
                 local value=colors[pair[2]]
                 local oldColors=previous.definition and previous.definition.bodyColors or {}
-                if value~=oldColors[pair[2]] and type(value)=="string" and value:match("^#?%x%x%x%x%x%x$")then
+                if value~=oldColors[pair[2]]and type(value)=="string"and value:match("^#?%x%x%x%x%x%x$")then
                     value=value:gsub("^#","")
-                    entry.avatar.setSkin(Color3.fromRGB(tonumber(value:sub(1,2),16),tonumber(value:sub(3,4),16),tonumber(value:sub(5,6),16)),pair[1])
+                    changedColors[pair[1]]=Color3.fromRGB(tonumber(value:sub(1,2),16),tonumber(value:sub(3,4),16),tonumber(value:sub(5,6),16))
                 end
+            end
+            if next(changedColors)then
+                if entry.avatar.setSkinColors then entry.avatar.setSkinColors(changedColors)
+                else for region,color in pairs(changedColors)do entry.avatar.setSkin(color,region)end end
             end
             table.sort(animationAssets,function(a,b)return a.assetType==b.assetType and a.id<b.id or a.assetType<b.assetType end)
             if not sameValue(entry.animationAssets,animationAssets)then

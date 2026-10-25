@@ -560,6 +560,7 @@ local function api()
     local source=readSource("avatar.lua", sha)
     local chunk,message=loadstring(source);assert(chunk,message)
     local create=chunk();assert(type(create)=="function","Avatar editor failed to load.")
+    local createMapping=module("appearance_mapping.lua")
     assert(alive,"Menu was closed.")
     local assetSerial=0
     local assetSession=game:GetService("HttpService"):GenerateGUID(false)
@@ -670,7 +671,7 @@ local function api()
     end
     avatarAssetReader=readAsset
     local function createAvatar(player,onStatus,assetReader,managedRespawn)
-        return create(player,onStatus,assetReader or readAsset,managedRespawn,diagnostics)
+        return create(player,onStatus,assetReader or readAsset,managedRespawn,diagnostics,createMapping)
     end
     avatarFactory=createAvatar
     avatarAPI=create(Players.LocalPlayer,function(message,working)
@@ -678,7 +679,7 @@ local function api()
         trace("Avatar: "..message)
         busy=working or actionRunning;statusText=message
         if render then render() end
-    end,readAsset,true,diagnostics)
+    end,readAsset,true,diagnostics,createMapping)
     return avatarAPI
 end
 local function atmosphere()
@@ -725,7 +726,7 @@ local function clothes()
         trace("Clothing: "..message)
         statusText=message
         if view then view.setStatus(message) end
-    end,true,avatarAssetReader)
+    end,true,avatarAssetReader,api().resolveClothes)
     return clothesAPI
 end
 local function localNames()
@@ -792,7 +793,7 @@ local function sharedLarp()
     local create=chunk();assert(type(create)=="function","Shared Larp sync failed to load.")
     sharedLarpAPI=create(Players.LocalPlayer,function()return gameBrowserSync().snapshotForSharing()end,function()return localNames().getSettings()end,
         function(player,onStatus)return avatarFactory(player,onStatus,nil,true)end,
-        function(player,onStatus)return clothesFactory(player,onStatus,true,avatarAssetReader)end,
+        function(player,onStatus,resolver)return clothesFactory(player,onStatus,true,avatarAssetReader,resolver)end,
         function(player,onStatus)return animationFactory(player,onStatus,true,avatarAssetReader)end,
         function(player,gui)return nameFactory(player,gui)end,
         function()return alive end,function(message)

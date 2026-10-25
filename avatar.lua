@@ -170,13 +170,14 @@ local function bodyClone(part)
     for _,item in ipairs(clone:GetDescendants()) do if item:IsA("JointInstance") then item:Destroy() end end
     return clone
 end
-return function(player,onStatus,readAsset,managedRespawn,diagnostics)
+return function(player,onStatus,readAsset,managedRespawn,diagnostics,createMapping)
     local function nativeCall(operation,callback,...)
         if diagnostics and diagnostics.run then
             return diagnostics.run(operation,{peerId=player.UserId},callback,...)
         end
         return callback(...)
     end
+    local mapping=createMapping and createMapping(player)
     local alive,generation=true,0
     local nativeSource,nativeContainer,nativeDescription,nativeSourceKey,nativeSourceRig,nativePreparation
     local nativeAccessories={}
@@ -273,6 +274,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         assert(valid(ctx),"Your avatar changed while loading. Try again on the new character.")
     end
     local function showOriginalAccessories()
+        if mapping then mapping.restore("accessories");hidden={};return end
         for _,entry in ipairs(hidden) do
             for part,properties in pairs(entry.parts) do
                 for property,value in pairs(properties) do pcall(function() part[property]=value end) end
@@ -605,6 +607,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             local target=ctx.character:FindFirstChild(name)
             assert(parts[name] and parts[name]:IsA("BasePart") and target and target:IsA("BasePart"),"This package does not contain the selected R15 body part.")
         end
+        if mapping then mapping.body(ctx,parts,names);return end
         local backups,changed,joints={},{},{}
         for _,joint in ipairs(ctx.character:GetDescendants()) do
             if joint:IsA("Motor6D") then joints[joint]={C0=joint.C0,C1=joint.C1} end
@@ -641,6 +644,10 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         assert(ok,err)
     end
     local function refitAccessories(ctx)
+        if mapping then
+            for _,entry in ipairs(added)do if entry.object.Parent==ctx.character then mapping.fitAccessory(ctx,entry.object)end end
+            return
+        end
         -- Body replacements keep live limbs, so Roblox does not rerun its
         -- accessory fitting pass. Rebuild classic welds against new frames;
         -- layered clothing remains owned by Roblox.
@@ -790,6 +797,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         nativeSourceKey=nil;nativeAccessories={}
         if nativeDescription then nativeDescription:Destroy();nativeDescription=nil end
         local description=describe(outfit)
+        description.UseAvatarSettings=true
         local sourceGeneration=nativeSourceGeneration
         local function checkSource()
             check(ctx)
@@ -841,6 +849,12 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         if not ok then error(err,0)end
     end
     function api.releasePreparedAppearance()clearNativeSource()end
+    if mapping then function api.resolveClothes(kind,id)
+        local field=({Shirt="Shirt",Pants="Pants",ShirtGraphic="GraphicTShirt"})[kind]
+        local prepared=nativeSource and nativeDescription and nativeDescription.UseAvatarSettings and nativeDescription[field]==id and nativeSource or nil
+        local original,replacement=mapping.clothingTemplates(context(),kind,id,prepared)
+        return original,replacement,mapping.projectClothing,mapping.clothingSource
+    end end
     function api.prepareAccessories(ids,isCurrent)
         local ctx=context()
         local failures,preload={},{}
@@ -864,9 +878,11 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         assert(handle and handle:IsA("BasePart"),"This accessory has no Handle.")
         if entry.object:FindFirstChildWhichIsA("WrapLayer",true)then return end
         local baseline=entry.adjustmentBaseline
-        if not baseline and not meta then return end
+        if not baseline and not meta and not mapping then return end
         if not baseline then
             baseline={size=handle.Size,attachments={},meshes={}}
+            local geometry=handle:IsA("MeshPart")and handle or handle:FindFirstChildOfClass("SpecialMesh")
+            if geometry then baseline.meshId=geometry.MeshId end
             local original=handle:FindFirstChild("OriginalSize")
             if original and original:IsA("Vector3Value")then baseline.originalSize=original.Value end
             baseline.originalPositions={}
@@ -884,13 +900,18 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             local v=meta and meta[field]
             return v and Vector3.new(v.X,v.Y,v.Z) or default
         end
+        local writes={}
+        local function write(object,property,source,value)
+            if mapping then writes[#writes+1]={object=object,property=property,baseline=source,desired=value}
+            else object[property]=value end
+        end
         local scale=vector("scale",Vector3.one)
-        handle.Size=baseline.size*scale
+        write(handle,"Size",baseline.size,baseline.size*scale)
         local original=handle:FindFirstChild("OriginalSize")
-        if baseline.originalSize and original and original:IsA("Vector3Value")then original.Value=baseline.originalSize*scale end
-        for position,value in pairs(baseline.originalPositions)do position.Value=value*scale end
-        for mesh,original in pairs(baseline.meshes)do mesh.Scale=original.scale*scale;mesh.Offset=original.offset*scale end
-        for attachment,frame in pairs(baseline.attachments)do attachment.CFrame=CFrame.new(frame.Position*scale)*frame.Rotation end
+        if baseline.originalSize and original and original:IsA("Vector3Value")then write(original,"Value",baseline.originalSize,baseline.originalSize*scale)end
+        for position,value in pairs(baseline.originalPositions)do write(position,"Value",value,value*scale)end
+        for mesh,original in pairs(baseline.meshes)do write(mesh,"Scale",original.scale,original.scale*scale);write(mesh,"Offset",original.offset,original.offset*scale)end
+        for attachment,frame in pairs(baseline.attachments)do write(attachment,"CFrame",frame,CFrame.new(frame.Position*scale)*frame.Rotation)end
         local joint=baseline.joint
         if joint and joint.Parent then
             local bodyScale=Vector3.one
@@ -902,7 +923,11 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             end
             local rotation=vector("rotation",Vector3.zero)*math.pi/180
             local adjustment=CFrame.new(vector("position",Vector3.zero)*bodyScale)*CFrame.Angles(rotation.X,rotation.Y,rotation.Z)
-            joint.C0=(CFrame.new(baseline.c0.Position*scale)*baseline.c0.Rotation)*adjustment:Inverse()
+            write(joint,"C0",baseline.c0,(CFrame.new(baseline.c0.Position*scale)*baseline.c0.Rotation)*adjustment:Inverse())
+        end
+        if mapping then
+            local geometry=handle:IsA("MeshPart")and handle or handle:FindFirstChildOfClass("SpecialMesh")
+            mapping.adjustments(context(),writes,geometry,baseline.meshId)
         end
     end
     function api.equipAccessory(value,metadata,assetType)
@@ -920,6 +945,14 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         for _,entry in ipairs(added)do if (entry.kind or accessoryKind(entry.object))==kind then count=count+1 end end
         if count>=20 then candidate:Destroy();error("You can wear at most 20 "..kind.." accessories at once.")end
         strip(candidate)
+        if mapping and not mapping.allowAccessory(ctx,candidate,id)then
+            candidate:Destroy()
+            if not reapplying then
+                if not table.find(settings.accessories,id)then table.insert(settings.accessories,id)end
+                settings.accessoryMeta=settings.accessoryMeta or {};settings.accessoryMeta[tostring(id)]=meta;save()
+            end
+            return "Accessory selection saved; this game's avatar settings exclude it."
+        end
         -- The original Dusekkar script gates these existing effects to user 916.
         if id==1474657 then
             for _,effect in ipairs(candidate:GetDescendants()) do
@@ -944,6 +977,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         local entry={key=nextKey,id=id,name=candidate.Name,object=candidate,meta=meta,kind=kind,seasonal=seasonal}
         adjustAccessory(entry,meta)
         table.insert(added,entry)
+        if mapping then mapping.accessory(ctx,candidate,id)end
         if id==1527622 then bunnyExplosion(ctx,candidate) end
         if not reapplying then
             table.insert(settings.accessories,id)
@@ -958,8 +992,9 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             if entry.key==key then
                 assert(not (meta and meta.smokestackStyle) or entry.id==169444515,"This hat does not support Smokestack styles.")
                 if sameMeta(entry.meta,meta)then return end
-                adjustAccessory(entry,meta);entry.meta=meta
-                if entry.id==169444515 then entry.seasonal=applySmokestackSeasonal(entry.object,nil,meta and meta.smokestackStyle) end
+                if not mapping or entry.object.Parent==player.Character then adjustAccessory(entry,meta)end
+                entry.meta=meta
+                if entry.id==169444515 and (not mapping or entry.object.Parent==player.Character)then entry.seasonal=applySmokestackSeasonal(entry.object,nil,meta and meta.smokestackStyle)end
                 settings.accessoryMeta=settings.accessoryMeta or {};settings.accessoryMeta[tostring(entry.id)]=meta;save()
                 return
             end
@@ -1073,6 +1108,11 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
     function api.removeCurrentAccessories()
         local ctx=context()
         capture(ctx)
+        if mapping then
+            mapping.hideAccessories(ctx)
+            if not reapplying then settings.hideOriginals=true;save()end
+            return "Original avatar accessories mapped (visible to you)."
+        end
         local hubAdded={}
         for _,entry in ipairs(added) do hubAdded[entry.object]=true end
         local avatarIds,avatarInstances={},{}
@@ -1162,9 +1202,10 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             assert(value and value:IsA("NumberValue"),"This character does not support avatar proportions.")
         end
         capture(ctx,true)
-        for key,value in pairs(values)do ctx.humanoid[scaleFields[key]].Value=value end
+        if mapping then mapping.scales(ctx,values)
+        else for key,value in pairs(values)do ctx.humanoid[scaleFields[key]].Value=value end end
         settings.scales=table.clone(values);save()
-        if snapshot and snapshot.bodyChanged and not reapplying then
+        if not mapping and snapshot and snapshot.bodyChanged and not reapplying then
             if settings.body then
                 api.applyBody(settings.body)
             else
@@ -1180,12 +1221,24 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         capture(ctx)
         if region=="All" then skin={} end
         skin[region]=color
-        paint(ctx.character,color,region)
+        if mapping then mapping.skin(ctx,color,region)else paint(ctx.character,color,region)end
         if not reapplying then
             if region=="All" then settings.colors={} end
             settings.colors[region]={color.R,color.G,color.B};save()
         end
         return "Skin color applied (visible to you)."
+    end
+    function api.setSkinColors(values)
+        local ctx=context()
+        for region,color in pairs(values)do assert(groups[region]and typeof(color)=="Color3","Invalid avatar color.")end
+        capture(ctx)
+        if mapping then mapping.skinColors(ctx,values)
+        else for region,color in pairs(values)do paint(ctx.character,color,region)end end
+        for region,color in pairs(values)do
+            skin[region]=color
+            settings.colors[region]={color.R,color.G,color.B}
+        end
+        save();return "Skin colors applied (visible to you)."
     end
     local fullBodyTemplates,fullBodyOrder={},{}
     local function cacheBody(key,template)
@@ -1238,6 +1291,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             local value=settings.scales and settings.scales[key]
             if value~=nil then description[field]=value end
         end end
+        description.UseAvatarSettings=true
         local ok,template=pcall(function() return nativeCall("Players.CreateHumanoidModelFromDescriptionAsync",function()return Players:CreateHumanoidModelFromDescriptionAsync(description,ctx.humanoid.RigType)end) end)
         description:Destroy()
         if not valid(ctx) then if ok and template then template:Destroy() end;check(ctx) end
@@ -1282,6 +1336,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         end
         local cacheKey=table.concat(key,":")
         local cached=fullBodyTemplates[cacheKey]
+        description.UseAvatarSettings=true
         local ok,template=pcall(function()
             return cached or nativeCall("Players.CreateHumanoidModelFromDescriptionAsync",function()return Players:CreateHumanoidModelFromDescriptionAsync(description,ctx.humanoid.RigType)end)
         end)
@@ -1306,7 +1361,9 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         local template=prepareBodyParts(ctx,parts,scales)
         local applied,message=pcall(function()
             capture(ctx,true)
-            if ctx.humanoid.RigType==Enum.HumanoidRigType.R6 then
+            if mapping and ctx.humanoid.RigType==Enum.HumanoidRigType.R6 then
+                mapping.r6(ctx,template)
+            elseif ctx.humanoid.RigType==Enum.HumanoidRigType.R6 then
                 for _,item in ipairs(ctx.character:GetChildren())do if item:IsA("CharacterMesh")then item:Destroy()end end
                 for _,item in ipairs(template:GetChildren())do if item:IsA("CharacterMesh")then item:Clone().Parent=ctx.character end end
                 applyPartAppearance(ctx.character:FindFirstChild("Head"),template:FindFirstChild("Head"))
@@ -1319,8 +1376,10 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
                 replaceParts(ctx,generated,headOnly and {"Head","HumanoidRootPart"} or nil)
                 refitAccessories(ctx)
                 local humanoid=template:FindFirstChildOfClass("Humanoid")
-                if humanoid then ctx.humanoid.HipHeight=humanoid.HipHeight end
-                freezeBodyScaling(ctx)
+                if humanoid then
+                    if mapping then mapping.hip(ctx,humanoid.HipHeight)else ctx.humanoid.HipHeight=humanoid.HipHeight end
+                end
+                if not mapping then freezeBodyScaling(ctx)end
             end
             snapshot.bodyChanged=true
         end)
@@ -1335,7 +1394,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
     function api.applyBody(value)
         local ctx=context()
         local isR6=ctx.humanoid.RigType==Enum.HumanoidRigType.R6
-        if value=="Blocky" and isR6 then
+        if value=="Blocky" and isR6 and not mapping then
             capture(ctx)
             for _,item in ipairs(ctx.character:GetChildren()) do if item:IsA("CharacterMesh") then item:Destroy() end end
             snapshot.bodyChanged=true
@@ -1344,7 +1403,9 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         end
         local template=bodySource(ctx,value)
         local applied,message=pcall(function()
-            if isR6 then
+            if mapping and isR6 then
+                capture(ctx);mapping.r6(ctx,template)
+            elseif isR6 then
                 local meshes={}
                 for _,item in ipairs(template:GetChildren()) do if item:IsA("CharacterMesh") then table.insert(meshes,item) end end
                 assert(#meshes>0,"This package has no compatible R6 body meshes. Try an R15 game.")
@@ -1362,12 +1423,16 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
                 replaceParts(ctx,parts)
                 refitAccessories(ctx)
                 local generatedHumanoid=template:FindFirstChildOfClass("Humanoid")
-                if generatedHumanoid and generatedHumanoid.HipHeight~=nil then ctx.humanoid.HipHeight=generatedHumanoid.HipHeight end
-                freezeBodyScaling(ctx)
+                if generatedHumanoid and generatedHumanoid.HipHeight~=nil then
+                    if mapping then mapping.hip(ctx,generatedHumanoid.HipHeight)else ctx.humanoid.HipHeight=generatedHumanoid.HipHeight end
+                end
+                if not mapping then freezeBodyScaling(ctx)end
             end
             snapshot.bodyChanged=true
-            if skin.All then paint(ctx.character,skin.All,"All") end
-            for region,color in pairs(skin) do if region~="All" then paint(ctx.character,color,region) end end
+            if not mapping then
+                if skin.All then paint(ctx.character,skin.All,"All") end
+                for region,color in pairs(skin) do if region~="All" then paint(ctx.character,color,region) end end
+            end
         end)
         template:Destroy()
         assert(applied,message)
@@ -1423,6 +1488,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         else
             local description=Instance.new("HumanoidDescription");description[field]=id
             for key,value in pairs(settings.scales or {})do description[descriptionScales[key]]=value end
+            description.UseAvatarSettings=true
             ok,template=pcall(function()return nativeCall("Players.CreateHumanoidModelFromDescriptionAsync",function()return Players:CreateHumanoidModelFromDescriptionAsync(description,ctx.humanoid.RigType)end)end)
             description:Destroy()
         end
@@ -1452,7 +1518,8 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         if isR6 then
             local applied,message=pcall(function()
                 capture(ctx)
-                if isDefault then
+                if mapping then mapping.r6(ctx,template,region)
+                elseif isDefault then
                     removeR6RegionMeshes(ctx,region)
                 elseif region=="Head" then
                     local source=template:FindFirstChild("Head")
@@ -1477,19 +1544,20 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         local applied,message=pcall(function() capture(ctx,true);replaceParts(ctx,parts,names);refitAccessories(ctx) end)
         template:Destroy()
         assert(applied,message)
-        freezeBodyScaling(ctx)
+        if not mapping then freezeBodyScaling(ctx)end
         snapshot.bodyChanged=true
         if not reapplying then settings.bodyParts[region]=value;save() end
         return region.." body part applied (visible to you)."
     end
     function api.restoreBodyPart(region)
         local ctx=context();assert(bodyRegions[region],"Choose a body region.")
-        if snapshot and snapshot.character==ctx.character then
+        if mapping then mapping.restorePart(region)
+        elseif snapshot and snapshot.character==ctx.character then
             if ctx.humanoid.RigType==Enum.HumanoidRigType.R6 then
                 restoreR6Region(ctx,region)
             elseif next(snapshot.parts) then
                 replaceParts(ctx,snapshot.parts,regionNames(region))
-                freezeBodyScaling(ctx)
+                if not mapping then freezeBodyScaling(ctx)end
             end
         end
         settings.bodyParts[region]=nil;save()
@@ -1532,12 +1600,16 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             snapshot.face={}
             for _,item in ipairs(head:GetChildren())do if item:IsA("Decal")then table.insert(snapshot.face,item:Clone())end end
         end
-        for _,item in ipairs(head:GetChildren())do if item:IsA("Decal")then item:Destroy()end end
-        local face=Instance.new("Decal");face.Name="face";face.Texture=texture;face.Parent=head
+        if mapping then mapping.face(ctx,texture,id)
+        else
+            for _,item in ipairs(head:GetChildren())do if item:IsA("Decal")then item:Destroy()end end
+            local face=Instance.new("Decal");face.Name="face";face.Texture=texture;face.Parent=head
+        end
         if not reapplying then settings.face=id;save()end
         return "Face applied (visible to you)."
     end
     local function restoreFaceAppearance(ctx)
+        if mapping then mapping.restore("face");return end
         if not snapshot or not snapshot.face or snapshot.character~=ctx.character then return end
         local head=ctx.character:FindFirstChild("Head");if not head then return end
         for _,item in ipairs(head:GetChildren())do if item:IsA("Decal")then item:Destroy()end end
@@ -1548,6 +1620,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         return "Original face restored."
     end
     local function restoreSkinAppearance(ctx)
+        if mapping then mapping.restore("skin");skin={};return true end
         if not snapshot or snapshot.character~=ctx.character then skin={};return false end
         local colors=ctx.character:FindFirstChildOfClass("BodyColors")
         if colors then
@@ -1566,6 +1639,11 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         local ctx=context()
         clearAdded()
         clearGear()
+        if mapping then
+            mapping.restore();skin={};hidden={}
+            if snapshot then snapshot.bodyChanged=false end
+            return "Game appearance restored."
+        end
         if not snapshot or snapshot.character~=ctx.character then return "Nothing to restore on this character." end
         if not keepOriginalsHidden then showOriginalAccessories() end
         if snapshot.bodyChanged then
@@ -1598,7 +1676,8 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
     end
     function api.restoreBody()
         local ctx=context()
-        if snapshot and snapshot.character==ctx.character and snapshot.bodyChanged then
+        if mapping then mapping.restore("body")
+        elseif snapshot and snapshot.character==ctx.character and snapshot.bodyChanged then
             if ctx.humanoid.RigType==Enum.HumanoidRigType.R15 then restoreBodyParts(ctx)
             else
                 local oldMeshes={};for _,item in ipairs(ctx.character:GetChildren()) do if item:IsA("CharacterMesh") then oldMeshes[#oldMeshes+1]=item end end
@@ -1623,10 +1702,11 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
     function api.getSettings() return copySettings() end
     function api.corpseSource()
         if not alive or not snapshot or snapshot.character~=player.Character then return nil end
-        return {character=snapshot.character,parts=snapshot.parts,head=snapshot.r6Head,colors=snapshot.colors,hidden=hidden,version=appearanceVersion}
+        return {character=snapshot.character,parts=snapshot.parts,head=snapshot.r6Head,colors=snapshot.colors,hidden=hidden,version=appearanceVersion,mapped=mapping~=nil,
+            attach=mapping and mapping.attachBody}
     end
     local operations={}
-    for _,name in ipairs({"equipAccessory","setAccessoryMetadata","equipGear","removeGear","removeAccessory","clearAccessories","removeCurrentAccessories","setSkin","setScales","applyBody","applyBodyParts","applyBodyPart","restoreBodyPart","applyFace","restoreFace","restoreSkin","restoreBody","restore"}) do
+    for _,name in ipairs({"equipAccessory","setAccessoryMetadata","equipGear","removeGear","removeAccessory","clearAccessories","removeCurrentAccessories","setSkin","setSkinColors","setScales","applyBody","applyBodyParts","applyBodyPart","restoreBodyPart","applyFace","restoreFace","restoreSkin","restoreBody","restore"}) do
         local operation=api[name]
         operations[name]=operation
         api[name]=function(...)
@@ -1667,7 +1747,9 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         local failures={}
         local ok,message=pcall(function()
             notify("Restoring original appearance...",true)
-            restoreAppearance(desired.hideOriginals)
+            -- Revisions update the replacement side of the mapping. Restoring
+            -- a captured outfit first would erase intervening game changes.
+            if not mapping then restoreAppearance(desired.hideOriginals)end
             local function apply(label,operation,...)
                 check(ctx)
                 notify("Restoring "..label.."...",true)
@@ -1685,9 +1767,19 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             else for region,value in pairs(desired.bodyParts) do apply(region,operations.applyBodyPart,region,value) end end
             if desired.face then apply("face",operations.applyFace,desired.face)end
             if desired.hideOriginals then apply("hidden accessories",operations.removeCurrentAccessories) end
-            for _,id in ipairs(desired.accessories) do apply("accessory "..id,operations.equipAccessory,id,(desired.accessoryMeta or {})[tostring(id)]) end
-            if desired.colors.All then apply("skin color",operations.setSkin,Color3.new(desired.colors.All[1],desired.colors.All[2],desired.colors.All[3]),"All") end
-            for region,color in pairs(desired.colors) do if region~="All" then apply(region.." color",operations.setSkin,Color3.new(color[1],color[2],color[3]),region) end end
+            local retained={}
+            if mapping then for _,entry in ipairs(added)do
+                retained[entry.id]=retained[entry.id]or {};table.insert(retained[entry.id],entry)
+            end end
+            for _,id in ipairs(desired.accessories)do
+                local existing=retained[id]and table.remove(retained[id])
+                if existing then apply("accessory adjustments",operations.setAccessoryMetadata,existing.key,(desired.accessoryMeta or {})[tostring(id)])
+                else apply("accessory "..id,operations.equipAccessory,id,(desired.accessoryMeta or {})[tostring(id)])end
+            end
+            local colors={}
+            if desired.colors.All then for region in pairs(groups)do colors[region]=Color3.new(desired.colors.All[1],desired.colors.All[2],desired.colors.All[3])end end
+            for region,color in pairs(desired.colors)do if region~="All"then colors[region]=Color3.new(color[1],color[2],color[3])end end
+            if next(colors)then apply("skin colors",operations.setSkinColors,colors)end
         end)
         if token==replayToken then reapplying=false end
         check(ctx)
@@ -1737,7 +1829,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
         end)
     end
     local changed=player.CharacterAdded:Connect(function(c)
-        generation=generation+1;forget(true);if not managedRespawn then schedule(c)end
+        generation=generation+1;if mapping then mapping.reset()end;forget(true);if not managedRespawn then schedule(c)end
     end)
     function api.destroy()
         cancelReady()
@@ -1756,6 +1848,7 @@ return function(player,onStatus,readAsset,managedRespawn,diagnostics)
             retiredAccessories[character]=nil
         end
         if snapshot and snapshot.character==player.Character then pcall(restoreAppearance) end
+        if mapping then mapping.destroy()end
         clearNativeSource()
         for _,template in pairs(fullBodyTemplates)do template:Destroy()end
         fullBodyTemplates={};fullBodyOrder={}
