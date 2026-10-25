@@ -296,6 +296,13 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         if not readyForAppearance() then return end
         if revision<=lastRevision then return end
         if browserModeKnown and not larpEnabled then lastRevision=revision;return end
+        local humanoid=player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        local requestedRig=value.definition.playerAvatarType.playerAvatarType
+        local liveRig=humanoid and (humanoid.RigType==Enum.HumanoidRigType.R6 and "R6" or "R15")
+        if liveRig~=requestedRig then
+            status("Outfit waiting: selected "..requestedRig..", character is "..tostring(liveRig)..". Use the game's rig switch or respawn controls to create the matching rig.")
+            return "rigMismatch"
+        end
         local avatar,clothes=getAvatar(),getClothes();local failed={};local loadErrors={};local desired={};local current={}
         for _,item in ipairs(value.items)do
             assetTypes[item.id]=item.assetType
@@ -754,10 +761,11 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
                 local previousRevision=lastRevision
                 if batch.browser and batch.browser.value and batch.browser.value.revision then
                     local command=batch.browser.value
-                    applyCommand(command)
+                    local result=applyCommand(command)
                     if lastRevision<command.revision then
                         retryCommand=command
-                        if retryTimerCommand~=command then
+                        if result=="rigMismatch" then retryTimerCommand=nil
+                        elseif retryTimerCommand~=command then
                             if retryRevision~=command.revision then retryAttempt=0;retryRevision=command.revision end
                             retryTimerCommand=command
                             local delay=math.min(30,2^math.min(retryAttempt,5))
