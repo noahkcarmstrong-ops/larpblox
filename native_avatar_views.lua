@@ -227,6 +227,7 @@ function M.create(player, getPreviews, describeSnapshot)
     local ownedOverlays={}
     local failedImages={}
     local verificationBadges={}
+    local verificationGeometry={}
     local renderingVerification=false
     local verificationCharacterConnections={}
     local stagingFolder
@@ -237,10 +238,16 @@ function M.create(player, getPreviews, describeSnapshot)
     local coreGui, playerGui, roots, available
     local status = "Native avatar thumbnails are disabled."
 
+    local function removeVerification(label)
+        for _,connection in ipairs(verificationGeometry[label] or {}) do connection:Disconnect() end
+        verificationGeometry[label]=nil
+        local badge=verificationBadges[label]
+        if badge then pcall(function() badge:Destroy() end) end
+        verificationBadges[label]=nil
+    end
     local function clearVerification()
         for label,badge in pairs(verificationBadges) do
-            pcall(function() badge:Destroy() end)
-            verificationBadges[label]=nil
+            removeVerification(label)
         end
     end
     local function verificationText(object)
@@ -258,11 +265,29 @@ function M.create(player, getPreviews, describeSnapshot)
         end
         return false
     end
+    local function positionVerification(object,badge)
+        local card,row=false,false
+        for _,ancestor in ipairs(ancestors(object)) do
+            local name=read(ancestor,"Name")
+            if name=="CardContent" then card=true;break end
+            if name=="PersonRow" then row=true;break end
+        end
+        badge.Position=UDim2.new(1,2,0.5,0)
+        if not card and not row then return end
+        local bounds,size=read(object,"TextBounds"),read(object,"AbsoluteSize")
+        if bounds and size then
+            local width=math.min(bounds.X,size.X)
+            -- Rows keep the original right-edge anchor. Roblox can retain a
+            -- wider name slot after alias replacement; remove that empty space.
+            badge.Position=card and UDim2.new(0,width+2,0.5,0)
+                or UDim2.new(1,width-size.X+2,0.5,0)
+        end
+    end
     local function renderVerification()
         if renderingVerification then return end
         renderingVerification=true
         for label,badge in pairs(verificationBadges) do
-            if not read(label,"Parent") then pcall(function() badge:Destroy() end);verificationBadges[label]=nil end
+            if not read(label,"Parent") then removeVerification(label) end
         end
         if not alive or not enabled or not verified then clearVerification();renderingVerification=false;return end
         local seen={}
@@ -270,10 +295,11 @@ function M.create(player, getPreviews, describeSnapshot)
             local index=rootIndexes[root]
             for object in pairs(index and index.objects or {}) do
                 local class=read(object,"ClassName")
-                local rosterText=plainText(read(object,"Text")):gsub("%s*%(You%)%s*$","")
-                if (class=="TextLabel" or class=="TextButton") and
+                local textObject=class=="TextLabel" or class=="TextButton"
+                local rosterText=textObject and plainText(read(object,"Text")):gsub("%s*%(You%)%s*$","") or ""
+                if textObject and
                     ((verificationText(object) and (hasOwnId(object,player) or uniquePeopleRow(object,player,{name=currentName})))
-                        or (verifiedRosterRow(object) and rosterText=="@"..currentName)) then
+                        or (rosterText=="@"..currentName and verifiedRosterRow(object))) then
                     seen[object]=true
                     if not verificationBadges[object] then
                         local badge=Instance.new("ImageLabel");badge.Name="LarpbloxVerifiedBadge";badge.BackgroundTransparency=1
@@ -281,12 +307,33 @@ function M.create(player, getPreviews, describeSnapshot)
                         badge.Position=UDim2.new(1,2,0.5,0);badge.ZIndex=(tonumber(read(object,"ZIndex")) or 1)+1
                         badge.Image="rbxasset://textures/ui/VerifiedBadgeNameIcon.png";badge.Parent=object
                         verificationBadges[object]=badge
+                        local bindings={}
+                        verificationGeometry[object]=bindings
+                        local queued=false
+                        local function settledPosition()
+                            if queued then return end
+                            queued=true
+                            task.defer(function()
+                                -- Roblox replaces/sizes the native name over the
+                                -- current frame. Reading bounds inside its signal
+                                -- can still return the previous account name width.
+                                task.wait()
+                                queued=false
+                                if verificationBadges[object]==badge then positionVerification(object,badge) end
+                            end)
+                        end
+                        for _,property in ipairs({"Text","TextBounds","AbsoluteSize"}) do
+                            local ok,signal=pcall(function() return object:GetPropertyChangedSignal(property) end)
+                            if ok and signal then bindings[#bindings+1]=signal:Connect(settledPosition) end
+                        end
+                        settledPosition()
                     end
+                    positionVerification(object,verificationBadges[object])
                 end
             end
         end
         for label,badge in pairs(verificationBadges) do
-            if not seen[label] then pcall(function() badge:Destroy() end);verificationBadges[label]=nil end
+            if not seen[label] then removeVerification(label) end
         end
         renderingVerification=false
     end
@@ -296,7 +343,7 @@ function M.create(player, getPreviews, describeSnapshot)
         if object then
             local class=read(object,"ClassName")
             local rosterText=plainText(read(object,"Text")):gsub("%s*%(You%)%s*$","")
-            local rosterMatch=verifiedRosterRow(object) and rosterText=="@"..currentName
+            local rosterMatch=rosterText=="@"..currentName and verifiedRosterRow(object)
             if (class~="TextLabel" and class~="TextButton") or (not verificationText(object) and not rosterMatch) then return end
         end
         verificationQueued=true
@@ -369,11 +416,27 @@ function M.create(player, getPreviews, describeSnapshot)
         LeftUpperLeg=true,LeftLowerLeg=true,LeftFoot=true,RightUpperLeg=true,RightLowerLeg=true,RightFoot=true}
     local function fullPortrait(image)
         local source=tostring(nativeImageSources[image] or read(image,"Image") or ""):lower()
-        -- Asset/CDN URLs often omit the thumbnail type. Only explicit head/bust
-        -- slots need a different crop; full-body PNGs keep their native image slot.
-        return not (source:find("avatarheadshot",1,true) or source:find("avatarbust",1,true)
-            or source:find("bust-thumbnail",1,true) or source:find("headshot-thumbnail",1,true)
-            or tostring(read(image,"Name") or ""):lower()=="headshot")
+        if source:find("avatarheadshot",1,true) or source:find("avatarbust",1,true)
+            or source:find("bust-thumbnail",1,true) or source:find("headshot-thumbnail",1,true) then return false end
+        -- CDN URLs omit the thumbnail kind. Use the native portrait slot too,
+        -- so peers and our own avatar share the same headshot camera.
+        local name=tostring(read(image,"Name") or ""):lower()
+        if name=="headshot" or name=="avatarheadshot" then return false end
+        local imageSize=read(image,"AbsoluteSize")
+        for depth,ancestor in ipairs(ancestors(image)) do
+            if depth>6 then break end
+            local ancestorName=tostring(read(ancestor,"Name") or ""):lower()
+            if ancestorName=="cardcontent" then return true end
+            if ancestorName=="personrow" or ancestorName=="playerlist" or ancestorName=="playerlistmaster" then return false end
+            local size=read(ancestor,"AbsoluteSize")
+            if depth==1 or (size and imageSize and math.abs(size.X-imageSize.X)<=1 and math.abs(size.Y-imageSize.Y)<=1) then
+                local find=read(ancestor,"FindFirstChildOfClass")
+                local corner=find and ancestor:FindFirstChildOfClass("UICorner")
+                local radius=read(corner,"CornerRadius")
+                if radius and radius.Scale>=0.5 then return false end
+            end
+        end
+        return true
     end
     local function posePortrait(frame,image)
         if not fullPortrait(image) then return end
@@ -479,7 +542,42 @@ function M.create(player, getPreviews, describeSnapshot)
         return overlay
     end
     local render
+    local visibilityConnections={}
+    local function releaseVisibility(image)
+        local group=visibilityConnections[image]
+        if not group then return end
+        visibilityConnections[image]=nil
+        for _,connection in ipairs(group)do connection:Disconnect()end
+    end
+    local function watchVisibility(image)
+        if visibilityConnections[image]then return end
+        local group={};visibilityConnections[image]=group
+        local function changed()
+            if alive and enabled and read(image,"Parent")then render(image)end
+        end
+        local ancestor=image
+        while ancestor do
+            local property=ancestor:IsA("GuiObject") and "Visible" or ancestor:IsA("ScreenGui") and "Enabled"
+            if property then group[#group+1]=ancestor:GetPropertyChangedSignal(property):Connect(changed)end
+            ancestor=ancestor.Parent
+        end
+        group[#group+1]=image.AncestryChanged:Connect(function()
+            releaseVisibility(image)
+            if alive and enabled and read(image,"Parent")then watchVisibility(image);changed()end
+        end)
+    end
+    local function visibleImage(image)
+        local ancestor=image
+        while ancestor do
+            if ancestor:IsA("GuiObject") and not ancestor.Visible then return false end
+            if ancestor:IsA("ScreenGui") and not ancestor.Enabled then return false end
+            ancestor=ancestor.Parent
+        end
+        return true
+    end
     render=function(image)
+        watchVisibility(image)
+        if not visibleImage(image)then return end
         if not previewSnapshot and not currentImage then ensurePreview();return end
         if directImages[image] and overlayKeys[image]==effectiveKey then return end
         local existing=overlays[image]
@@ -731,6 +829,7 @@ function M.create(player, getPreviews, describeSnapshot)
         for index,root in ipairs(roots)do
             pcall(function()connections["removed"..index]=root.DescendantRemoving:Connect(function(object)
                 imageCandidates[object]=nil
+                releaseVisibility(object)
                 if overlays[object] or directImages[object] or hiddenImages[object] or pending[object] then destroyOverlay(object)end
                 if geometryConnections[object] then
                     for _,connection in ipairs(geometryConnections[object]) do connection:Disconnect() end
@@ -797,6 +896,7 @@ function M.create(player, getPreviews, describeSnapshot)
         end
         effectiveKey = nextKey
         if not enabled then
+            for image in pairs(visibilityConnections)do releaseVisibility(image)end
             previewSnapshot = nil;previewKey=nil;previewBuild=nil
             for image in pairs(directImages) do destroyOverlay(image) end
             for image in pairs(overlays) do destroyOverlay(image) end
@@ -804,12 +904,17 @@ function M.create(player, getPreviews, describeSnapshot)
             restoreAllImages();clearVerification()
             status = "Native avatar thumbnails are disabled."; return api.report()
         end
-        scan();renderVerification(); status = available and "Native avatar thumbnails active." or status; return api.report()
+        scan()
+        -- Appearance-only updates do not change badge ownership or placement.
+        -- UI additions/text/geometry changes already have their own listeners.
+        if not wasEnabled or previousName~=currentName or previousDisplayName~=currentDisplayName or previousVerified~=verified then renderVerification()end
+        status = available and "Native avatar thumbnails active." or status; return api.report()
     end
     function api.report() return status .. " Scans: " .. tostring(scanCount) .. "; rendered: " .. tostring(renderedCount) .. "." end
     function api.destroy()
         if not alive then return end
         alive = false;previewBuild=nil
+        for image in pairs(visibilityConnections)do releaseVisibility(image)end
         for _,root in ipairs(roots)do releaseRoot(root)end
         if rendererOwners[ownerKey]==api then rendererOwners[ownerKey]=nil end
         for _, connection in pairs(connections) do pcall(function() connection:Disconnect() end) end

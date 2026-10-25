@@ -42,12 +42,12 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
     local nextStatus=0
     local lastDiagnostic={}
     local diagnosticGui=localPlayer:FindFirstChildOfClass("PlayerGui")
-    local function diagnose(userId,phase,detail,ms)
+    local function diagnose(userId,phase,detail,ms,checkpoint)
         local key=tostring(userId)
         local signature=phase..":"..tostring(detail or "")
         if ms==nil and lastDiagnostic[key]==signature then return end
         lastDiagnostic[key]=signature
-        if presentation.log then presentation.log("shared_"..phase,{peerId=key,detail=detail or "",ms=ms})end
+        if presentation.log then presentation.log("shared_"..phase,{peerId=key,detail=detail or "",ms=ms},checkpoint)end
         if not diagnosticGui then return end
         -- Event-written, bounded metadata for support; never include tokens.
         diagnosticGui:SetAttribute("LarpbloxShared_"..tostring(userId),HttpService:JSONEncode({
@@ -73,6 +73,7 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         for value,original in pairs(entry.originalScales or {})do
             pcall(function()if value.Parent then value.Value=original end end)
         end
+        if entry.hatScripts then pcall(entry.hatScripts.destroy)end
         for _,api in ipairs({entry.names,entry.animations,entry.clothes,entry.avatar,entry.views})do
             if api and api.destroy then pcall(api.destroy)end
         end
@@ -100,9 +101,10 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         local snapshot=record.snapshot
         if type(snapshot)~="table" or snapshot.version~=1 or tostring(snapshot.userId)~=record.userId then return false end
         if snapshot.verified~=nil and type(snapshot.verified)~="boolean" then return false end
-        if not safeId(record.userId) or type(snapshot.definition)~="table" or type(snapshot.definition.assets)~="table" or #snapshot.definition.assets>100 or type(snapshot.items)~="table" or #snapshot.items>100 then return false end
+        if not safeId(record.userId) or type(snapshot.definition)~="table" or type(snapshot.definition.assets)~="table" or #snapshot.definition.assets>512 or type(snapshot.items)~="table" or #snapshot.items>512 then return false end
         if record.imageUrl~=nil and not safeImageUrl(record.imageUrl) then return false end
         if record.verified~=nil and type(record.verified)~="boolean" then return false end
+        if record.hatScripts~=nil and presentation.validHatScripts and not presentation.validHatScripts(record.hatScripts)then return false end
         if record.name~=nil then
             local name=record.name
             if type(name)~="table" or type(name.enabled)~="boolean" or type(name.username)~="string" or #name.username>20 or not name.username:match("^[A-Za-z0-9_]*$") or type(name.displayName)~="string" or #name.displayName>50 or name.displayName:find("[%c]") then return false end
@@ -111,7 +113,9 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         return true
     end
     local function presentRecord(entry,record)
-        if sameValue(entry.presented,record)then return end
+        local previous=entry.presented
+        if previous and sameValue(previous.snapshot,record.snapshot) and sameValue(previous.name,record.name)
+            and previous.verified==record.verified and previous.imageUrl==record.imageUrl then return end
         local name=record.name
         if not sameValue(entry.name,name)then
             if type(name)=="table" and name.enabled then pcall(entry.names.set,name.username,name.displayName)
@@ -134,7 +138,7 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
                 local imageGeneration=entry.imageGeneration
                 task.spawn(function()
                     local loaded,reason=pcall(function()
-                        local bytes=game:HttpGet(record.imageUrl,false)
+                        local bytes=transport.downloadImage(record.imageUrl)
                         assert(type(bytes)=="string" and #bytes<=4*1024*1024 and bytes:sub(1,8)=="\137PNG\r\n\26\n","Invalid shared avatar image.")
                         if peers[record.userId]~=entry or entry.imageGeneration~=imageGeneration or not sharing or not isAlive() then return end
                         imageSerial=imageSerial+1
@@ -183,28 +187,42 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
                 queued=false
                 if not active or not sharing or not isAlive() or peers[userId]~=entry
                     or entry.player.Character~=character then return end
-                local dirty=false
+                local dirty,accessoryOnly=false,true
                 local reason
-                for object,values in pairs(expected)do
-                    if not object:IsDescendantOf(character)then dirty=true;reason=object.ClassName.." removed";break end
-                    for property,value in pairs(values)do
-                        if object[property]~=value then dirty=true;reason=object.Name.."."..property;break end
-                    end
-                    if dirty then break end
+                local function mark(object,detail)
+                    dirty=true
+                    local accessory=object:IsA("Accessory") or object:IsA("Hat")
+                    if not accessory then accessoryOnly=false end
+                    reason=detail
                 end
-                if not dirty then
+                for object,values in pairs(expected)do
+                    if not object:IsDescendantOf(character)then mark(object,object.ClassName.." "..object.Name.." removed")
+                    else for property,value in pairs(values)do
+                        if object[property]~=value then mark(object,object.Name.."."..property);break end
+                    end
+                    end
+                    if dirty and not accessoryOnly then break end
+                end
+                -- An accessory event can coincide with a body replacement.
+                -- Check both before deciding that only accessories need repair.
+                if accessoryOnly then
                     for _,object in ipairs(character:GetChildren())do
-                        if properties(object) and not expected[object]then dirty=true;reason=object.ClassName.." added";break end
+                        if properties(object) and not expected[object]then mark(object,object.ClassName.." added")end
+                        if dirty and not accessoryOnly then break end
                     end
                     local head=character:FindFirstChild("Head")
-                    if not dirty and head then
+                    if accessoryOnly and head then
                         for _,object in ipairs(head:GetChildren())do
-                            if properties(object) and not expected[object]then dirty=true;reason=object.ClassName.." added";break end
+                            if properties(object) and not expected[object]then mark(object,object.ClassName.." added");break end
                         end
                     end
                 end
                 if dirty then
-                    entry.snapshot=nil;entry.appearanceStarted=nil;entry.accessoriesComplete=nil
+                    if accessoryOnly then
+                        entry.accessoriesComplete=false;entry.refreshAccessories=true
+                    else
+                        entry.snapshot=nil;entry.appearanceStarted=nil;entry.accessoriesComplete=nil
+                    end
                     local record=latestRecords[userId]
                     if record then
                         diagnose(userId,"appearance_changed",reason)
@@ -264,6 +282,7 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         entry.snapshot=nil
         entry.appearanceStarted=nil
         entry.accessoriesComplete=nil
+        entry.refreshAccessories=nil
         entry.animationAssets=nil
         entry.originalScales=nil
     end
@@ -308,7 +327,10 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
             and entry.accessoriesComplete~=false
             and sameValue(entry.snapshot,snapshot) and sameValue(entry.name,record.name)
             and entry.verified==(record.verified==true)
-            and entry.imageUrl==record.imageUrl then return end
+            and entry.imageUrl==record.imageUrl then
+            if entry.hatScripts then entry.hatScripts.update(record.hatScripts,record.snapshot)end
+            return
+        end
         if entry and entry.player~=target then cleanupPeer(record.userId);entry=nil end
         if entry then refreshCharacter(entry,target)end
         local fresh=not entry or not entry.appearanceStarted
@@ -327,6 +349,24 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
         if entry.stopObserving then entry.stopObserving();entry.stopObserving=nil end
         local accessoryFailures={}
         local ok,err=pcall(function()
+            -- Resolve cold catalog assets before any visible body changes.
+            -- Cached preparation does not clone or attach an accessory.
+            local preparationFailures={}
+            if entry.avatar.prepareAppearance and presentation.describeSnapshot then
+                local prepared,reason=pcall(entry.avatar.prepareAppearance,snapshot,presentation.describeSnapshot,current)
+                if not current()then return end
+                if not prepared then diagnose(record.userId,"native_source_failed",tostring(reason))end
+            end
+            if entry.avatar.prepareAccessories then
+                local ids,existing={},{}
+                for _,item in ipairs(entry.avatar.listAccessories())do existing[item.id]=true end
+                for _,item in ipairs(snapshot.items)do
+                    if ACCESSORY_TYPES[tonumber(item.assetType)] and not existing[item.id]then ids[#ids+1]=item.id end
+                end
+                if fresh then diagnose(record.userId,"preparing_accessories",tostring(#ids).." assets",nil,true)end
+                preparationFailures=entry.avatar.prepareAccessories(ids,current)
+                if not current()then return end
+            end
             -- Keep the live overlay and its caches when only part of the outfit changes.
             local previous=entry.snapshot or {}
             local oldItems,oldSlots,slots={},{},{}
@@ -356,13 +396,19 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
             -- original Roblox package. Apply on first render and after respawn too.
             local humanoid=target.Character and target.Character:FindFirstChildOfClass("Humanoid")
             local blocky,bodyChanged=true,fresh
+            local headOnly=not fresh and not sameValue(body.Head or 0,oldBody.Head or 0)
+                and sameValue(snapshot.definition.scales,previous.definition and previous.definition.scales)
             for _,region in ipairs(BODY_REGIONS)do
                 if region~="Head" and (body[region] or 0)~=0 then blocky=false end
+                if region~="Head" and (body[region] or 0)~=(oldBody[region] or 0)then headOnly=false end
                 if (body[region] or 0)~=(oldBody[region] or 0)then bodyChanged=true end
             end
-            local batched=bodyChanged and type(entry.avatar.applyBodyParts)=="function"
+            local previousScales=previous.definition and previous.definition.scales or {}
+            local scalesChanged=not sameValue(snapshot.definition.scales or {},previousScales)
+            local batched=(bodyChanged or scalesChanged) and type(entry.avatar.applyBodyParts)=="function"
             local bulk=not batched and blocky and bodyChanged and type(entry.avatar.applyBody)=="function"
-            if batched then entry.avatar.applyBodyParts(body,snapshot.definition.scales)
+            if fresh then diagnose(record.userId,"preparing_body",nil,nil,true)end
+            if batched then entry.avatar.applyBodyParts(body,snapshot.definition.scales,headOnly)
             elseif bulk then entry.avatar.applyBody("Blocky")end
             if not current()then return end
             for _,region in ipairs(batched and {} or BODY_REGIONS)do
@@ -409,14 +455,17 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
                     end
                 end
             end
-            if fresh then entry.avatar.removeCurrentAccessories();entry.appearanceStarted=true end
+            if fresh then diagnose(record.userId,"equipping_accessories",nil,nil,true)end
+            if fresh or entry.refreshAccessories then entry.avatar.removeCurrentAccessories();entry.appearanceStarted=true end
             local equipped={}
             for _,item in ipairs(entry.avatar.listAccessories())do equipped[item.id]=item.key end
             local accessoryMetadata={}
             for _,asset in ipairs(snapshot.definition.assets)do accessoryMetadata[asset.id]=asset.meta end
             -- Load additions first so existing accessories remain visible while assets load.
             for id in pairs(wanted)do
-                if not equipped[id]then
+                if preparationFailures[id]then
+                    accessoryFailures[#accessoryFailures+1]=tostring(id)..": "..preparationFailures[id]
+                elseif not equipped[id]then
                     local loaded,reason=pcall(entry.avatar.equipAccessory,id,accessoryMetadata[id])
                     if not loaded then accessoryFailures[#accessoryFailures+1]=tostring(id)..": "..tostring(reason)end
                 elseif entry.avatar.setAccessoryMetadata then
@@ -451,8 +500,13 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
             -- missing accessories using listAccessories above.
             entry.snapshot=snapshot
             entry.accessoriesComplete=#accessoryFailures==0
+            entry.refreshAccessories=nil
             diagnose(record.userId,#accessoryFailures==0 and "applied" or "partial",table.concat(accessoryFailures,"; "),math.floor((os.clock()-applyStarted)*1000))
             entry.name=record.name;entry.imageUrl=record.imageUrl
+            if presentation.createHatScripts then
+                if not entry.hatScripts then entry.hatScripts=presentation.createHatScripts(target)end
+                entry.hatScripts.update(record.hatScripts,record.snapshot)
+            end
             observeAppearance(entry,record.userId)
             if presentation.onAppearanceApplied then presentation.onAppearanceApplied(record.userId)end
             if #accessoryFailures>0 then
@@ -475,6 +529,7 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
             name={enabled=true,username=username,displayName=displayName}
         end
         local record={version=1,userId=tostring(localPlayer.UserId),snapshot=snapshot,name=name,verified=snapshot.verified==true}
+        if presentation.getHatScripts then record.hatScripts=presentation.getHatScripts()end
         if presentation.getImageUrl then
             local url=presentation.getImageUrl()
             if safeImageUrl(url) then record.imageUrl=url end
@@ -546,6 +601,17 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
     local function receive(event)
         if not sharing or not isAlive()or type(event)~="table"then return end
         if event.type=="status"then status(tostring(event.message));return end
+        if event.type=="hat-scripts"then
+            local id=event.userId
+            if type(id)~="string" or id==tostring(localPlayer.UserId) or not liveRecords[id]
+                or not presentation.validHatScripts or not presentation.validHatScripts(event.hatScripts)then return end
+            -- This path never reloads bodies, thumbnails, or accessory models.
+            liveRecords[id].hatScripts=event.hatScripts
+            if latestRecords[id]then latestRecords[id].hatScripts=event.hatScripts end
+            local entry=peers[id]
+            if entry and entry.hatScripts and entry.character==entry.player.Character then entry.hatScripts.update(event.hatScripts)end
+            return
+        end
         if event.type=="snapshot"and type(event.players)=="table"then
             local seen={}
             for _,record in ipairs(event.players)do
@@ -558,6 +624,7 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
             local record=event.record
             if record.userId~=tostring(localPlayer.UserId)then liveRecords[record.userId]=record;queueRecord(record)end
         elseif event.type=="remove"and type(event.userId)=="string"then
+            local entry=peers[event.userId];if entry and entry.hatScripts then entry.hatScripts.update(nil)end
             liveRecords[event.userId]=nil;chooseRecord(event.userId);requestProfiles(event.userId)
         end
         processPending()
@@ -568,6 +635,14 @@ return function(localPlayer,getSnapshot,getNameSettings,createAvatar,createCloth
             if sharing and isAlive()then
                 local ok,reason=pcall(publish,snapshot)
                 if not ok then status("Shared appearance: "..tostring(reason))end
+            end
+        end)
+    end
+    if presentation.onHatScriptsChanged then
+        connections[#connections+1]=presentation.onHatScriptsChanged(function()
+            if sharing and isAlive()then
+                local ok,reason=pcall(publish)
+                if not ok then status("Shared hat effects: "..tostring(reason))end
             end
         end)
     end

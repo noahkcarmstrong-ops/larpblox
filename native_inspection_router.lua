@@ -92,8 +92,12 @@ return function(localPlayer,createInspector)
         local handle={}
         function handle.update(options)
             if not alive or states[player.UserId]~=state then return end
+            local previous=state.options
             state.options=options or {enabled=false,name=""}
-            route()
+            -- An inactive player's outfit/image cannot change which native
+            -- inspector is selected. Retain it until selection changes.
+            if active==state or previous.enabled~=state.options.enabled
+                or previous.name~=state.options.name then route()end
         end
         function handle.report()return active==state and inspector and inspector.report() or "Inspector is waiting."end
         function handle.destroy()

@@ -1,5 +1,10 @@
 # Larpblox project instructions
 
+## Project terminology
+
+- **unlarp** = the original player / avatar.
+- **deadname** = the unlarp's name.
+
 ## Reuse native Roblox behavior
 
 - Inspect Roblox's existing code and behavior before implementing a replacement. Prefer reusing its native rendering, formatting, controls, and lifecycle handling.

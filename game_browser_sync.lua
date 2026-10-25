@@ -6,6 +6,14 @@ local accessoryTypes={[8]=true,[41]=true,[42]=true,[43]=true,[44]=true,[45]=true
 local animationTypes={[48]="ClimbAnimation",[50]="FallAnimation",[51]="IdleAnimation",[52]="JumpAnimation",[53]="RunAnimation",[54]="SwimAnimation",[55]="WalkAnimation",[56]="PoseAnimation",[78]="MoodAnimation"}
 local SCALE_PROPERTIES={height="BodyHeightScale",width="BodyWidthScale",depth="BodyDepthScale",head="HeadScale",bodyType="BodyTypeScale",proportion="BodyProportionScale"}
 local function safeId(v)return type(v)=="number" and v==v and v>0 and v%1==0 and v<9007199254740992 end
+local function imageBytes(url)
+    assert(type(url)=="string" and (url:match("^https://tr%.rbxcdn%.com/") or url:match("^https://t%d%.rbxcdn%.com/")),"Invalid avatar image URL.")
+    local fn=request or http_request or (syn and syn.request)
+    assert(type(fn)=="function","This executor does not provide HTTP requests.")
+    local response=fn({Url=url,Method="GET",Timeout=15})
+    assert(response and tonumber(response.StatusCode or response.Status)==200,"Could not download avatar image.")
+    return response.Body
+end
 local function hex(c)
     local function n(v)return math.clamp(math.floor(v*255+0.5),0,255) end
     return string.format("%02x%02x%02x",n(c.R),n(c.G),n(c.B))
@@ -23,22 +31,25 @@ local function call(method,path,token,body)
 end
 return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNames,getViews,sharing)
     local api,token,connected,lastJson,lastRevision={},nil,false,nil,0
+    api.downloadImage=imageBytes
     local generation=0
     local lastNameState=nil
     local lastBrowserCommand
     local lastSharingPreference=nil
     local sharingConnected=false
     local scheduleSnapshot
-    local larpEnabled,larpName,larpVerified,lastSnapshot=false,"",false,nil
+    local larpEnabled,larpName,larpDisplayName,larpVerified,lastSnapshot=false,"","",false,nil
     local browserModeKnown=false
     local socket,socketReady,socketMine=nil,false,0
     local incoming,pumping={},false
     local retryCommand
+    local retryTimerCommand,retryRevision,retryAttempt=nil,nil,0
     local imageValue,imageAsset,imageUrl,imageSerial=nil,nil,nil,0
     local appearanceConnections={}
     local characterConnections={}
     local instanceConnections={}
     local pump
+    local scheduleReconnect
     local snapshotPending=false
     local snapshotScheduleId=0
     local loadingImageUrl
@@ -124,9 +135,12 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
     local browserFace=false
     local function definitionKey(definition)
         if type(definition)~="table" then return "" end
-        local ids,values={},{}
-        for _,asset in ipairs(definition.assets or {})do ids[#ids+1]=asset.id end
-        table.sort(ids);for _,id in ipairs(ids)do values[#values+1]=tostring(id)end
+        local ids,styles,values={}, {},{}
+        for _,asset in ipairs(definition.assets or {})do
+            ids[#ids+1]=asset.id
+            styles[asset.id]=asset.meta and asset.meta.smokestackStyle or ""
+        end
+        table.sort(ids);for _,id in ipairs(ids)do values[#values+1]=tostring(id);values[#values+1]=tostring(styles[id] or "")end
         for _,key in ipairs({"headColor","torsoColor","leftArmColor","rightArmColor","leftLegColor","rightLegColor"})do
             values[#values+1]=tostring((definition.bodyColors or {})[key] or ""):gsub("^#",""):lower()
         end
@@ -138,7 +152,7 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         return imageAsset and imageAssetDefinition and (not expected or definitionKey(imageAssetDefinition)==definitionKey(expected)) and imageAsset or nil
     end
     local function updateViews()
-        queueViews({enabled=larpEnabled,name=larpName,verified=larpVerified,snapshot=lastBrowserSnapshot or lastSnapshot,image=currentImage()})
+        queueViews({enabled=larpEnabled,name=larpName,displayName=larpDisplayName,verified=larpVerified,snapshot=lastBrowserSnapshot or lastSnapshot,image=currentImage()})
     end
     local function applyImage(value)
         if type(value)~="table" or value.version~=1 or tostring(value.userId)~=tostring(player.UserId) then return end
@@ -154,7 +168,7 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         loadingImageUrl=url
         local mine=generation
         local ok,result=pcall(function()
-            local bytes=game:HttpGet(url,false)
+            local bytes=imageBytes(url)
             assert(type(bytes)=="string" and #bytes<=4*1024*1024 and bytes:sub(1,8)=="\137PNG\r\n\26\n","The avatar image is not a valid PNG.")
             if mine~=generation or not imageValue or imageValue.imageUrl~=url then return end
             imageSerial=imageSerial+1
@@ -172,6 +186,11 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         local desc=humanoid:GetAppliedDescription();local settings=getAvatar():getSettings();local clothes=getClothes():getSettings()
         local colors=character:FindFirstChildOfClass("BodyColors")
         local function color(region,name)
+            -- This snapshot edits the saved browser outfit. Native game colors
+            -- (uniforms, morphs, death effects) must not replace a selected Larp
+            -- color just because they changed the live character's presentation.
+            local selected=settings.colors and (settings.colors[region] or settings.colors.All)
+            if selected then return hex(Color3.new(selected[1],selected[2],selected[3]))end
             local c=colors and colors[region.."Color3"]
             if not c then local part=character:FindFirstChild(name) or character:FindFirstChild(region=="Torso" and "Torso" or region:gsub("Arm","UpperArm"):gsub("Leg","UpperLeg"));c=part and part.Color end
             return c and hex(c) or "ffffff"
@@ -180,7 +199,7 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         for _,pair in ipairs({{"HeightScale","height"},{"WidthScale","width"},{"DepthScale","depth"},{"HeadScale","head"},{"BodyTypeScale","bodyType"},{"ProportionScale","proportion"}})do local live=humanoid:FindFirstChild(({height="BodyHeightScale",width="BodyWidthScale",depth="BodyDepthScale",head="HeadScale",bodyType="BodyTypeScale",proportion="BodyProportionScale"})[pair[2]]);local v=live and live:IsA("NumberValue") and live.Value or desc[pair[1]];if type(v)=="number" and v==v and v<math.huge then definition.scales[pair[2]]=v end end
         local items,seen={},{}
         local function add(id,name,assetType,include,meta)
-            if include and safeId(id) and not seen[id] and #items<100 then
+            if include and safeId(id) and not seen[id] and #items<512 then
                 local label=product(id,name);assetType=assetTypes[id] or assetType
                 seen[id]=true;items[#items+1]={id=id,name=string.sub(label,1,128),itemType="Asset",assetType=assetType};definition.assets[#definition.assets+1]={id=id,meta=meta}
             end
@@ -237,8 +256,8 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
     end
     local function validSnapshot(value)
         assert(type(value)=="table" and value.version==1 and tostring(value.userId)==tostring(player.UserId),"Browser snapshot is for a different account.")
-        assert(type(value.definition)=="table" and type(value.definition.assets)=="table" and #value.definition.assets<=100,"Browser snapshot assets are invalid.")
-        assert(type(value.items)=="table" and #value.items<=100,"Browser snapshot items are invalid.")
+        assert(type(value.definition)=="table" and type(value.definition.assets)=="table" and #value.definition.assets<=512,"Browser snapshot assets are invalid.")
+        assert(type(value.items)=="table" and #value.items<=512,"Browser snapshot items are invalid.")
         for _,asset in ipairs(value.definition.assets)do assert(type(asset)=="table" and safeId(asset.id),"Browser asset is invalid.")end
         local colors=value.definition.bodyColors;local colorKeys={"headColor","torsoColor","leftArmColor","rightArmColor","leftLegColor","rightLegColor"}
         assert(type(colors)=="table", "Browser body colors are invalid.")
@@ -286,13 +305,42 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         local ok,msg=pcall(function()
             local before=snapshot()
             for _,item in ipairs(before.items)do if accessoryTypes[item.assetType] then current[item.id]=true end end
-            if next(value.definition.scales)~=nil and avatar.setScales then
-                local loaded,reason=pcall(avatar.setScales,value.definition.scales)
-                if not loaded then loadErrors[#loadErrors+1]="Proportions: "..tostring(reason)end
+            local preparationFailures={}
+            if avatar.prepareAppearance and sharing and sharing.describeSnapshot then
+                local function currentPreparation()
+                    return isAlive() and readyForAppearance() and lastBrowserCommand==value
+                        and (not browserModeKnown or larpEnabled)
+                end
+                local prepared,reason=pcall(avatar.prepareAppearance,value,sharing.describeSnapshot,currentPreparation)
+                if not currentPreparation()then return end
+                if not prepared and sharing.log then sharing.log("local_native_source_failed",{detail=tostring(reason)})end
+            end
+            if avatar.prepareAccessories then
+                local ids={}
+                for _,item in ipairs(value.items)do
+                    if accessoryTypes[item.assetType] and not current[item.id]then ids[#ids+1]=item.id end
+                end
+                preparationFailures=avatar.prepareAccessories(ids)
+                if not readyForAppearance()then return end
             end
             local currentBody,desiredBody={},{ }
             for _,item in ipairs(before.items)do local region=bodyTypeRegions[item.assetType];if region then currentBody[region]=item.id end end
             for _,item in ipairs(value.items)do local region=bodyTypeRegions[item.assetType];if region then desiredBody[region]=item.id end end
+            if avatar.prepareBodyParts then
+                local changed=false
+                for _,entry in ipairs(bodyRegions)do
+                    local region=entry[1]
+                    if browserBody[region]==nil or (currentBody[region] or 0)~=(desiredBody[region] or 0)then changed=true end
+                end
+                for key,scale in pairs(value.definition.scales)do
+                    if (before.definition.scales or {})[key]~=scale then changed=true end
+                end
+                if changed then avatar.prepareBodyParts(desiredBody,value.definition.scales)end
+            end
+            if next(value.definition.scales)~=nil and avatar.setScales then
+                local loaded,reason=pcall(avatar.setScales,value.definition.scales)
+                if not loaded then loadErrors[#loadErrors+1]="Proportions: "..tostring(reason)end
+            end
             local bodySettings=avatar.getSettings()
             local resetBody=false
             if bodySettings.body and avatar.restoreBody then
@@ -300,6 +348,29 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
                 if loaded then currentBody={};browserBody={};originalBody={};resetBody=true
                 else loadErrors[#loadErrors+1]="Body: "..tostring(reason)end
             end
+            if avatar.applyBodyParts then
+                local changed=resetBody
+                local complete={}
+                for _,entry in ipairs(bodyRegions)do
+                    local region=entry[1]
+                    complete[region]=desiredBody[region] or 0
+                    if browserBody[region]==nil or (currentBody[region] or 0)~=complete[region] then changed=true end
+                end
+                for key,scale in pairs(value.definition.scales)do
+                    if (before.definition.scales or {})[key]~=scale then changed=true end
+                end
+                if changed then
+                    -- The native generated root and HipHeight must accompany
+                    -- the complete body; individual regions cannot supply them.
+                    local loaded,reason=pcall(avatar.applyBodyParts,complete,value.definition.scales)
+                    if loaded then
+                        for region,id in pairs(complete)do
+                            if originalBody[region]==nil then originalBody[region]=currentBody[region] end
+                            browserBody[region]=id
+                        end
+                    else loadErrors[#loadErrors+1]="Body: "..tostring(reason)end
+                end
+            else
             for _,entry in ipairs(bodyRegions)do
                 local region=entry[1];local wanted=desiredBody[region];local owned=browserBody[region] or (bodySettings.bodyParts or {})[region]
                 if wanted and currentBody[region]~=wanted then
@@ -310,6 +381,7 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
                     local loaded,reason=pcall(avatar.applyBodyPart,region,0)
                     if loaded then browserBody[region]=0;originalBody[region]=nil else loadErrors[#loadErrors+1]=region..": "..tostring(reason)end
                 end
+            end
             end
             for _,entry in ipairs({{"Head","headColor"},{"Torso","torsoColor"},{"LeftArm","leftArmColor"},{"RightArm","rightArmColor"},{"LeftLeg","leftLegColor"},{"RightLeg","rightLegColor"}})do
                 local wanted=value.definition.bodyColors[entry[2]]:gsub("^#",""):lower()
@@ -334,7 +406,7 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
             local managed={};for _,entry in ipairs(avatar.listAccessories())do managed[entry.id]=true end
             local function needsManaged(id)
                 local meta=accessoryMetadata[id]
-                return not managed[id] and meta and (meta.scale or meta.position or meta.rotation)
+                return not managed[id] and meta and (meta.scale or meta.position or meta.rotation or meta.smokestackStyle)
             end
             local changed=false;for id in pairs(desired)do if not current[id] or needsManaged(id)then changed=true end end;for id in pairs(current)do if not desired[id]then changed=true end end
             if changed then
@@ -353,7 +425,9 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
                 end
                 for _,item in ipairs(value.items)do
                     if accessoryTypes[item.assetType] and not present[item.id] then
-                        local loaded,reason=pcall(avatar.equipAccessory,item.id,accessoryMetadata[item.id])
+                        local loaded,reason
+                        if preparationFailures[item.id]then loaded,reason=false,preparationFailures[item.id]
+                        else loaded,reason=pcall(avatar.equipAccessory,item.id,accessoryMetadata[item.id],item.assetType)end
                         if loaded then present[item.id]=true else loadErrors[#loadErrors+1]=item.name..": "..tostring(reason) end
                     end
                 end
@@ -368,18 +442,23 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
             end
             -- Gear remains in the saved browser outfit, but is not rendered
             -- until equip/unequip state can be synchronized.
-            local currentClothes=clothes.getSettings();local clothingTypes={[2]={"ShirtGraphic","equipTShirt","removeTShirt"},[11]={"Shirt","equipShirt","removeShirt"},[12]={"Pants","equipPants","removePants"}}
-            local visibleClothes={};for _,item in ipairs(before.items)do if clothingTypes[item.assetType] then visibleClothes[item.assetType]=item.id end end
+            local clothingTypes={[2]={"ShirtGraphic","equipTShirt","removeTShirt"},[11]={"Shirt","equipShirt","removeShirt"},[12]={"Pants","equipPants","removePants"}}
             local wantedClothes={};local wantedAnimations={}
             for _,item in ipairs(value.items)do
                 local slot=clothingTypes[item.assetType]
                 if slot then
                     wantedClothes[item.assetType]=true
-                    if visibleClothes[item.assetType]~=item.id then clothes[slot[2]](item.id)end
+                    -- Saved settings can outlive the native Shirt/Pants instances.
+                    -- Reapply the selected item so Roblox's actual template matches.
+                    clothes[slot[2]](item.id)
                 elseif animationTypes[item.assetType] then wantedAnimations[#wantedAnimations+1]={id=item.id,assetType=item.assetType,name=item.name}
                 elseif item.assetType~=19 and not accessoryTypes[item.assetType] and item.assetType~=17 and item.assetType~=18 and item.assetType~=27 and item.assetType~=28 and item.assetType~=29 and item.assetType~=30 and item.assetType~=31 and item.assetType~=79 then failed[#failed+1]=item.name end
             end
-            for assetType,slot in pairs(clothingTypes)do if not wantedClothes[assetType] and currentClothes[slot[1]]~=0 and clothes[slot[3]] then clothes[slot[3]]()end end
+            for assetType,slot in pairs(clothingTypes)do
+                -- Saved settings may say a slot is already removed while Roblox
+                -- has recreated its native Shirt/Pants instance after a reset.
+                if not wantedClothes[assetType] and clothes[slot[3]] then clothes[slot[3]]()end
+            end
             if getAnimations then
                 local animationApi=getAnimations();local settings=animationApi.getSettings()
                 local currentAnimations={};for _,item in ipairs(before.items)do if animationTypes[item.assetType] then currentAnimations[item.assetType]=item.id end end
@@ -410,7 +489,8 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
     local function applyNameState(value)
         if value then lastModeValue=value end
         local state="disabled"
-        local name=""
+        local username=""
+        local displayName=""
         local verified=false
         if value then
             -- Older relays may return an outfit-shaped payload for unknown paths.
@@ -419,12 +499,15 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
             verified=value.verified==true
             if value.enabled then
                 assert(value.name=="" or (value.name:match("^[A-Za-z0-9_]+$") and #value.name>=3 and #value.name<=20),"Browser name is invalid.")
-                state="enabled:"..value.name..(verified and ":verified" or "");name=value.name
+                username=value.name
+                displayName=type(value.displayName)=="string" and value.displayName or username
+                assert(#displayName>=1 and #displayName<=50 and not displayName:find("[%c]"),"Browser display name is invalid.")
+                state="enabled:"..username..":"..displayName..(verified and ":verified" or "")
             end
         end
         local firstModeState=value~=nil and not browserModeKnown
         local reenabled=browserModeKnown and not larpEnabled and state~="disabled"
-        larpEnabled=state~="disabled";larpName=name;larpVerified=larpEnabled and verified or false
+        larpEnabled=state~="disabled";larpName=username;larpDisplayName=displayName;larpVerified=larpEnabled and verified or false
         if reenabled then
             -- Turning off restores the real avatar without deleting the saved
             -- Larp command. A mode-only toggle does not create a new revision.
@@ -448,7 +531,9 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
             -- Restore captured originals, without loading assets or replacing the character.
             -- The browser retains the saved Larp outfit for the next enable.
             retryCommand=nil;incoming.browser=nil
-            getAvatar().restore()
+            local avatar=getAvatar()
+            avatar.restore()
+            if avatar.releasePreparedAppearance then avatar.releasePreparedAppearance()end
             getClothes().restore()
             if getAnimations then getAnimations().setAvatarAssets({}) end
             browserBody,originalBody,browserFace={},{},false
@@ -458,8 +543,8 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         if getNames then
             local names=getNames()
             if state=="disabled" then names.setEnabled(false)
-            elseif name=="" then names.restore()
-            else names.set(name,name)end
+            elseif username=="" then names.restore()
+            else names.set(username,displayName)end
             if names.setVerified then names.setVerified(larpVerified) end
         end
         updateViews()
@@ -478,6 +563,7 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
             local ok=pcall(function()socket:Send(HttpService:JSONEncode({type="publish",channel=channel,value=value}))end)
             if ok then return end
             closeSocket()
+            if scheduleReconnect then scheduleReconnect()end
         end
         local path="/v1/"..(channel=="game" and "game" or channel).."/"..player.UserId
         local ok,result=pcall(call,"POST",path,token,value)
@@ -662,7 +748,26 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
                 if batch.browser and batch.browser.value and batch.browser.value.revision then
                     local command=batch.browser.value
                     applyCommand(command)
-                    if lastRevision~=command.revision then retryCommand=command else retryCommand=nil end
+                    if lastRevision<command.revision then
+                        retryCommand=command
+                        if retryTimerCommand~=command then
+                            if retryRevision~=command.revision then retryAttempt=0;retryRevision=command.revision end
+                            retryTimerCommand=command
+                            local delay=math.min(30,2^math.min(retryAttempt,5))
+                            retryAttempt=retryAttempt+1
+                            task.delay(delay,function()
+                                if retryTimerCommand~=command then return end
+                                retryTimerCommand=nil
+                                if not connected or generation~=mine or not larpEnabled or not isAlive()
+                                    or lastRevision>=command.revision or not lastBrowserCommand
+                                    or lastBrowserCommand.revision~=command.revision then return end
+                                -- A failed download must recover without a new
+                                -- browser event or respawn. Only retry the latest outfit.
+                                if not incoming.browser then incoming.browser={value=command}end
+                                task.spawn(pump)
+                            end)
+                        end
+                    else retryCommand=nil;retryTimerCommand=nil;retryAttempt=0 end
                 end
                 if batch.image then
                     local value=batch.image.value
@@ -673,6 +778,21 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         end)
         pumping=false
         if not ok then status("Browser socket: "..tostring(err))end
+    end
+    local recovery={enabled=true,pending=false,attempt=0,serial=0}
+    scheduleReconnect=function()
+        if not recovery.enabled or recovery.pending or not isAlive()then return end
+        recovery.pending=true
+        local serial=recovery.serial
+        local delay=math.min(30,2^math.min(recovery.attempt,5))
+        recovery.attempt=recovery.attempt+1
+        status("Desktop disconnected. Reconnecting automatically...")
+        task.delay(delay,function()
+            if recovery.serial~=serial then return end
+            recovery.pending=false
+            if not recovery.enabled or not isAlive() or socketReady then return end
+            pcall(api.connect)
+        end)
     end
     local function openSocket()
         local ws=WebSocket or websocket or (syn and syn.websocket)
@@ -686,11 +806,9 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         socket=candidate
         candidate.OnClose:Connect(function()
             if socket==candidate then
-                local wasReady=socketReady
                 socket=nil;socketReady=false;lastJson=nil;sharingConnected=false
                 connectionState(false)
-                status("Desktop disconnected. Open desktop and reload the interface.")
-                if wasReady then task.defer(function()if connected and generation==mine then pcall(api.connect)end end)end
+                scheduleReconnect()
             end
         end)
         candidate.OnMessage:Connect(function(message)
@@ -699,6 +817,7 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
             if not read or type(value)~="table" then return end
             if value.type=="ready" then
                 socketReady=true;lastJson=nil
+                recovery.attempt=0
                 connectionState(true)
                 local function keepAlive()
                     task.delay(20,function()
@@ -745,32 +864,39 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
                 notifySharing(value.value)
             elseif value.type=="state" and (value.channel=="browser" or value.channel=="names" or value.channel=="image") then
                 incoming[value.channel]={value=value.value};task.spawn(pump)
-            elseif value.type=="error" then connectionState(false);closeSocket()end
+            elseif value.type=="error" then connectionState(false);closeSocket();scheduleReconnect()end
         end)
         local sent=pcall(function()candidate:Send(HttpService:JSONEncode({version=1,type="auth",token=token,userId=tostring(player.UserId),role="game",avatarLookup=sharing and type(sharing.lookupAvatar)=="function" or false,clientRequests=sharing and type(sharing.clientRequest)=="function" or false}))end)
         if not sent then connectionState(false);closeSocket();return false end
         task.delay(5,function()
             if socket==candidate and generation==mine and not socketReady then
                 connectionState(false)
-                closeSocket();status("Desktop did not complete the connection. Reload the interface to reconnect.")
+                closeSocket();scheduleReconnect()
             end
         end)
         return true
     end
-    function api.connect(code)
+    local function connectOnce(code)
         if not code or code=="" then
             local ok,pair=pcall(call,"GET","/v1/pair","")
             code=ok and pair and pair.code or readSaved()
         end
         assert(validToken(code),"Open the Larpblox app to connect.")
         local relay=call("GET","/v1/status",code);if relay and relay.instanceId and relay.instanceId~=api.instanceId then lastRevision=0;lastNameState=nil;api.instanceId=relay.instanceId end
-        closeSocket();incoming={};retryCommand=nil;generation=generation+1;token=code;connected=true;lastJson=nil;save(code);status("Browser connected.")
+        closeSocket();incoming={};retryCommand=nil;retryTimerCommand=nil;retryAttempt=0;generation=generation+1;token=code;connected=true;lastJson=nil;save(code);status("Browser connected.")
         startAppearanceWatchers()
         local opened=openSocket()
         if not opened then connected=false end
         return opened
     end
-    function api.disconnect()generation=generation+1;stopAppearanceWatchers();closeSocket();incoming={};retryCommand=nil;connected=false;token=nil;lastJson=nil;lastNameState=nil;sharingConnected=false;applyNameState(nil);lastSharingPreference=nil;queueViews({enabled=false});status("Browser disconnected.")end
+    function api.connect(code)
+        recovery.enabled=true
+        local ok,result=pcall(connectOnce,code)
+        if not ok or not result then scheduleReconnect()end
+        if not ok then error(result,0)end
+        return result
+    end
+    function api.disconnect()recovery.enabled=false;recovery.pending=false;recovery.serial=recovery.serial+1;generation=generation+1;stopAppearanceWatchers();closeSocket();incoming={};retryCommand=nil;retryTimerCommand=nil;retryAttempt=0;connected=false;token=nil;lastJson=nil;lastNameState=nil;sharingConnected=false;applyNameState(nil);lastSharingPreference=nil;queueViews({enabled=false});status("Browser disconnected.")end
     function api.isLarpEnabled()return larpEnabled end
     function api.isConnected()return connected end
     function api.status()return connected and (socketReady and "Browser connected via WebSocket." or "Waiting for desktop WebSocket.") or "Browser disconnected."end
@@ -785,6 +911,21 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
         end
         assert(readyForAppearance(),"Waiting for the saved browser outfit.")
         return snapshot()
+    end
+    function api.prepareSavedAppearance()
+        -- The bridge already retains commands before startup readiness. Warming
+        -- their native source is read-only; visible application still waits for
+        -- the existing restore/readiness lifecycle.
+        local command=lastBrowserCommand
+        if not larpEnabled or not command or not sharing or not sharing.describeSnapshot then return end
+        local avatar=getAvatar()
+        if not avatar.prepareAppearance then return end
+        local character=player.Character
+        local function current()
+            return isAlive() and larpEnabled and lastBrowserCommand==command and player.Character==character
+        end
+        local ok,err=pcall(avatar.prepareAppearance,command,sharing.describeSnapshot,current)
+        if not ok and current() and sharing.log then sharing.log("local_native_source_failed",{detail=tostring(err)})end
     end
     function api.resumeAppearance(characterChanged)
         if not readyForAppearance()then return end
@@ -832,7 +973,7 @@ return function(player,getAvatar,getClothes,isAlive,onStatus,getAnimations,getNa
     task.defer(function()
         if not isAlive()then return end
         local ok,err=pcall(api.connect)
-        if not ok then connectionState(false);status("Open Larpblox Desktop, then reload the interface to connect.")end
+        if not ok then connectionState(false);scheduleReconnect()end
     end)
     return api,saved
 end

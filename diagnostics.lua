@@ -11,6 +11,13 @@ return function(context)
     local warned=false
     local initialized=false
     local environment=type(getgenv)=="function" and getgenv() or _G
+    if type(environment.larpblox)~="table" then environment.larpblox={} end
+    if type(environment.larpblox.diagnostics)~="table" then environment.larpblox.diagnostics={} end
+    if environment.larpblox.diagnostics.verbose==nil then environment.larpblox.diagnostics.verbose=false end
+    local function verbose()
+        local options=environment.larpblox
+        return type(options)=="table" and type(options.diagnostics)=="table" and options.diagnostics.verbose==true
+    end
     environment.__LarpbloxLatestLogSession=stamp
     local function initialize()
         if initialized then return end
@@ -60,6 +67,8 @@ return function(context)
         end)
         if not ok and not warned then warned=true;warn("Larpblox: diagnostic file could not be written.")end
     end
+    local serial,active=0,{}
+    local threadOperations=setmetatable({}, {__mode="k"})
     local lastState={}
     local function log(event,fields)
         if closed or type(writefile)~="function"then return end
@@ -79,6 +88,59 @@ return function(context)
         if bytes>=16384 then flush()
         elseif not queued then queued=true;task.defer(flush)end
     end
-    log("session_start")
-    return {log=log,close=function()if closed then return end;log("session_end");flush();closed=true end,path=latest}
+    local function stats(record)
+        if not verbose() then return end
+        local luaOk,luaMemory=pcall(gcinfo)
+        if luaOk then record.luaMemoryKB=luaMemory end
+        local ok,memory=pcall(function()return game:GetService("Stats"):GetTotalMemoryUsageMb()end)
+        if ok then record.totalMemoryMB=memory end
+        local countOk,count=pcall(function()return game:GetService("Stats").InstanceCount end)
+        if countOk then record.instanceCount=count end
+    end
+    local function run(operation,fields,callback,...)
+        if not verbose() and (operation=="MeshPart.ApplyMesh" or operation=="Humanoid.AddAccessory") then
+            -- Keep normal diagnostics off hot per-part/per-accessory paths.
+            -- Slow calls and failures remain useful without two disk flushes
+            -- for every successful sub-millisecond mutation.
+            local started=os.clock()
+            local result=table.pack(pcall(callback,...))
+            local elapsedMs=(os.clock()-started)*1000
+            if not result[1] or elapsedMs>=16 then
+                local record={operation=operation,elapsedMs=elapsedMs,ok=result[1]}
+                for key,value in pairs(fields or {})do record[key]=value end
+                if not result[1]then record.error=tostring(result[2])end
+                log(result[1] and "operation_slow" or "operation_failed",record);flush()
+            end
+            if not result[1]then error(result[2],0)end
+            return table.unpack(result,2,result.n)
+        end
+        serial=serial+1
+        local id=stamp..":"..serial
+        local record={operation=operation,operationId=id}
+        for key,value in pairs(fields or {})do record[key]=value end
+        local thread=coroutine.running()
+        local parent=thread and threadOperations[thread]
+        record.parentOperationId=parent
+        if thread then threadOperations[thread]=id end
+        local started=os.clock()
+        active[id]={operation=operation,started=started}
+        stats(record);log("operation_start",record);flush()
+        local result=table.pack(pcall(callback,...))
+        active[id]=nil
+        if thread then threadOperations[thread]=parent end
+        record.elapsedMs=math.floor((os.clock()-started)*1000*100)/100
+        record.ok=result[1]
+        if not result[1]then record.error=tostring(result[2])end
+        stats(record);log("operation_finish",record);flush()
+        if not result[1]then error(result[2],0)end
+        return table.unpack(result,2,result.n)
+    end
+    log("session_start",{verbose=verbose(),sessionId=stamp})
+    return {log=log,flush=flush,run=run,close=function()
+        if closed then return end
+        for id,entry in pairs(active)do
+            log("operation_cancelled",{operationId=id,operation=entry.operation,elapsedMs=(os.clock()-entry.started)*1000,reason="interface_destroyed"})
+        end
+        log("session_end");flush();closed=true
+    end,path=latest}
 end

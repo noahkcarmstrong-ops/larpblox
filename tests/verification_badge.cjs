@@ -13,7 +13,7 @@ if (!block.includes('gsub("%s*%(You%)%s*$","")')) throw new Error('own-row suffi
 if (block.includes('object.Text=')) throw new Error('renderer must not rewrite Roblox-owned text');
 
 const character = source.slice(source.indexOf('local function bindVerificationCharacter'), source.indexOf('local function restoreImage'));
-if (!character.includes('character.ChildAdded:Connect')) throw new Error('respawn/head replacement hook is missing');
+if (!character.includes('queueVerification()')) throw new Error('respawn must refresh badges without watching accessory additions');
 if (!source.includes('player.CharacterAdded:Connect(bindVerificationCharacter)')) throw new Error('CharacterAdded hook is missing');
 if (!source.includes('verificationCharacterConnections')) throw new Error('character connection cleanup state is missing');
 

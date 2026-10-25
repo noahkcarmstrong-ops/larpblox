@@ -55,6 +55,30 @@ local marketplace={assetType=28};function marketplace:GetProductInfoAsync()retur
 game={GetService=function(_,n)return({Players=players,HttpService=http,MarketplaceService=marketplace})[n]end,GetObjects=function(_,id)assert(id=="rbxassetid://123" or id=="rbxassetid://456");if id=="rbxassetid://456"then return{gearAsset:Clone()}end;if mode=="respawn"then local fresh=node("Model","Fresh");player.Character=fresh;player.CharacterAdded:Fire(fresh)end;if mode=="blocked"then return{node("Part","NotWearable")}end;if accessory.destroyed then return{freshAccessory()}end;return{accessory}end,HttpGet=function()return http:GetAsync()end}
 Enum.InfoType={Asset="Asset"}
 local create=dofile(arg and arg[1] or "avatar.lua");assert(type(create)=="function","module returns create(player)");local api=create(player)
+if arg and arg[2]=="package-regression" then
+    table.clone=table.clone or function(value)local copy={};for k,v in pairs(value)do copy[k]=v end;return copy end
+    local getService=game.GetService
+    game.GetService=function(self,name)
+        if name=="ContentProvider" then return {PreloadAsync=function()end} end
+        return getService(self,name)
+    end
+    -- Start with a textured account package, rather than a plain body.
+    local torso=body:FindFirstChild("UpperTorso")
+    local original=node("SurfaceAppearance","SurfaceAppearance");original.ColorMap="account-package";original.Parent=torso
+    local source=template:FindFirstChild("UpperTorso")
+    local replacement=node("SurfaceAppearance","SurfaceAppearance");replacement.ColorMap="larp-package";replacement.Parent=source
+    api.applyBody("Girl")
+    assert(torso:FindFirstChildOfClass("SurfaceAppearance").ColorMap=="larp-package","Larp body must replace the real package's body surface")
+    replacement:Destroy()
+    api.applyBody("Blocky")
+    assert(not torso:FindFirstChildOfClass("SurfaceAppearance"),"Default Larp body must remove the real package's texture")
+    api.restoreBody()
+    assert(torso:FindFirstChildOfClass("SurfaceAppearance").ColorMap=="account-package","Restore must return the original real package's texture")
+    assert(body:FindFirstChild("UpperTorso")==torso,"Package changes preserve the live body part")
+    api.destroy()
+    print("Real-package body surfaces replace, clear, and restore correctly.")
+    return
+end
 assert(api.equipAccessory(123):match("Equipped"));local candidate=body:FindFirstChild("Blue Hat");assert(injected.destroyed and candidate,"sanitizing removes inserted script and parents cloned accessory");assert(#api.listAccessories()==1)
 -- Azurelight uses Roblox's modern avatar model format; the callback supplies
 -- that model so its original particle visuals survive script stripping.

@@ -63,16 +63,8 @@ local function smooth(object,properties,duration,done)
     tween:Play()
 end
 local isMM2 = game.GameId == 66654135 or game.PlaceId == 142823291
-local crosshairAPI
-local mm2API,mm2NativeAPI,mm2SavedNativeAPI,mm2EffectsAPI,mm2EffectsNativeAPI,mm2EffectsLibraryAPI
-local atmosphereAPI
-local mm2EmoteBarAPI
-local mm2EmotesNativeAPI
-local mm2WeaponEditorAPI
-local mm2GunLibraryAPI
-local nativeViewsAPI
-local localNamesAPI
-local accessorySoundsAPI
+local moduleRuntime={}
+local accessoryRuntime={}
 local mm2Enabled=false
 local mm2EmotesShown=false
 local playerGui = localPlayer:WaitForChild("PlayerGui")
@@ -85,8 +77,11 @@ local diagnosticOk,diagnosticResult=pcall(function()
     return factory()({revision=moduleRevision,playerId=localPlayer.UserId,placeId=game.PlaceId})
 end)
 if diagnosticOk then diagnostics=diagnosticResult end
-local function logDiagnostic(event,fields)
-    if diagnostics then diagnostics.log(event,fields)end
+local function logDiagnostic(event,fields,checkpoint)
+    if diagnostics then
+        diagnostics.log(event,fields)
+        if checkpoint and diagnostics.flush then diagnostics.flush()end
+    end
 end
 local prismChunk, prismError = loadstring(readSource("prism.lua", moduleRevision))
 assert(prismChunk, prismError)
@@ -281,6 +276,7 @@ layout.SortOrder = Enum.SortOrder.LayoutOrder
 layout.Padding = UDim.new(0, 6)
 local avatarAPI,motionAPI,animationAPI,clothesAPI,previewsAPI,gameBrowserSyncAPI,sharedLarpAPI
 local avatarFactory,animationFactory,clothesFactory,nameFactory
+local avatarAssetReader
 local previewFactory,portraitFactory,inspectionRouter
 local corpseAPI
 local fetchSharedProfiles
@@ -324,6 +320,7 @@ local function uiSetting(key,default)
     return type(value)==type(default) and value or default
 end
 local hideOnStart=uiSetting("hideOnStart",false)
+local noPlayerCollisions=uiSetting("noPlayerCollisions",false)
 local openingKey=Enum.KeyCode.RightShift
 local savedOpeningKey=uiSetting("openingKey","RightShift")
 for _,key in ipairs(Enum.KeyCode:GetEnumItems())do
@@ -401,6 +398,7 @@ local paletteOpen=uiSetting("palette",false)
 local function saveUI()
     local values={page=activePage,accessory=accessoryInput,bundle=bundleInput,red=rgb[1],green=rgb[2],blue=rgb[3],hex=hexInput,region=regionIndex,palette=paletteOpen,emote=emoteInput,animationBundle=animationInput,emoteSlot=emoteSlot,shirt=shirtInput,pants=pantsInput}
     values.hideOnStart=hideOnStart
+    values.noPlayerCollisions=noPlayerCollisions
     values.openingKey=openingKey.Name
     values.animationSection=animationSection
     values.backgroundId=backgroundId
@@ -438,7 +436,72 @@ local function module(file)
     local chunk,message=loadstring(readSource(file,moduleRevision),"="..file);assert(chunk,message)
     return chunk()
 end
+function accessoryRuntime.factory(file)
+    accessoryRuntime.factories=accessoryRuntime.factories or {}
+    if not accessoryRuntime.factories[file]then accessoryRuntime.factories[file]=module(file)end
+    return accessoryRuntime.factories[file]
+end
+function accessoryRuntime.channel()
+    if not accessoryRuntime.sharing then
+        accessoryRuntime.sharing=module("hat_sharing.lua")({session=game:GetService("HttpService"):GenerateGUID(false),delay=task.delay})
+        accessoryRuntime.sharing.attach(accessoryRuntime)
+    end
+    return accessoryRuntime.sharing
+end
+function accessoryRuntime.forPeer(player)
+    local options={remote=true,viewerGui=playerGui}
+    local runtimes,lastSnapshot={},nil
+    local scripts={turret={1055299,"teapot_turret.lua"},doombringer={4640898,"doombringer.lua"},
+        contest={92719239,"contest_award.lua"},crown={1078202,"black_iron_crown.lua"}}
+    local receive=accessoryRuntime.channel().receiver(runtimes,function(event)
+        local own=Players.LocalPlayer.Character
+        local source=player.Character
+        local ownRoot=own and own:FindFirstChild("HumanoidRootPart")
+        local sourceRoot=source and source:FindFirstChild("HumanoidRootPart")
+        if not ownRoot or not sourceRoot then return false end
+        if (ownRoot.Position-sourceRoot.Position).Magnitude>250 then return false end
+        -- One budget for all peers; crowded servers cannot multiply particle work.
+        local now=os.clock()
+        local budget=accessoryRuntime.effectBudget or {at=now,tokens=32}
+        accessoryRuntime.effectBudget=budget
+        budget.tokens=math.min(32,budget.tokens+(now-budget.at)*24);budget.at=now
+        if budget.tokens<1 then return false end
+        budget.tokens=budget.tokens-1;return true
+    end)
+    return {
+        update=function(state,snapshot)
+            if snapshot and snapshot~=lastSnapshot then
+                lastSnapshot=snapshot
+                local assets={}
+                for _,item in ipairs(snapshot.items)do assets[item.id]=true end
+                -- Most peers need no scripted-hat controllers at all.
+                for key,entry in pairs(scripts)do
+                    if assets[entry[1]]then
+                        if not runtimes[key]then runtimes[key]=accessoryRuntime.factory(entry[2])(player,nil,options)end
+                    elseif runtimes[key]then runtimes[key].destroy();runtimes[key]=nil end
+                end
+                local hasSounds=false
+                for _,item in ipairs(player.Character and player.Character:GetChildren()or {})do
+                    if (item:IsA("Accessory")or item:IsA("Hat"))and item:FindFirstChildWhichIsA("Sound",true)then hasSounds=true;break end
+                end
+                if hasSounds and not runtimes.sounds then runtimes.sounds=accessoryRuntime.factory("accessory_sounds.lua")(player,playerGui,options)
+                elseif not hasSounds and runtimes.sounds then runtimes.sounds.destroy();runtimes.sounds=nil end
+            end
+            local enabled=state~=nil
+            for _,runtime in pairs(runtimes)do runtime.setEnabled(enabled)end
+            if enabled then receive(state)else
+                if runtimes.contest then runtimes.contest.setHeld(false)end
+                if runtimes.doombringer then runtimes.doombringer.setHeld(false)end
+            end
+        end,
+        destroy=function()for _,runtime in pairs(runtimes)do pcall(runtime.destroy)end end,
+    }
+end
 local lightingSchema=module("lighting_schema.lua")
+local function playerCollisions()
+    if not moduleRuntime.playerCollisionsAPI then moduleRuntime.playerCollisionsAPI=module("player_collisions.lua")(Players,workspace) end
+    return moduleRuntime.playerCollisionsAPI
+end
 local gamePages={}
 local pages={"Animations","Emotes","Lighting"}
 for _,descriptor in ipairs(module("game_pages.lua"))do
@@ -498,23 +561,116 @@ local function api()
     local chunk,message=loadstring(source);assert(chunk,message)
     local create=chunk();assert(type(create)=="function","Avatar editor failed to load.")
     assert(alive,"Menu was closed.")
-    local function readAsset(path)
-        assert(path=="assets/dominus-azurelight.rbxm","Unsupported local avatar asset.")
-        assert(type(writefile)=="function" and type(customAsset)=="function",
-            "This executor cannot load Dominus Azurelight's visual effects locally.")
-        local file="larpblox-dominus-azurelight.rbxm"
-        local bytes=readSource(path,sha)
-        assert(bytes:sub(1,8)=="<roblox!","Invalid Dominus Azurelight visual asset.")
-        local wrote,writeError=pcall(writefile,file,bytes)
+    local assetSerial=0
+    local assetSession=game:GetService("HttpService"):GenerateGUID(false)
+    local function readAssetInner(path)
+        local catalog=type(path)=="number"
+        assert(catalog and path>0 and path%1==0 and path<9007199254740992 or path=="assets/dominus-azurelight.rbxm","Unsupported avatar asset.")
+        local function checkpoint(phase)
+            logDiagnostic("avatar_asset_load",{asset=tostring(path),phase=phase},true)
+        end
+        local function assetCall(operation,callback)
+            if diagnostics and diagnostics.run then
+                return diagnostics.run(operation,{asset=tostring(path),generation=loadGeneration},callback)
+            end
+            return callback()
+        end
+        local function decodeAsset(uri)
+            -- On Volt, HTTP after a native catalog decode in the same thread
+            -- reproduced a hang. Isolate native decoding; wait for completion
+            -- through an event rather than a retry timer or frame listener.
+            local completed=Instance.new("BindableEvent")
+            local result
+            task.defer(function()
+                result=table.pack(pcall(function()
+                    assert(alive,"Menu was closed before asset decoding.")
+                    return assetCall("asset.decode",function()return game:GetObjects(uri)end)
+                end))
+                completed:Fire()
+            end)
+            completed.Event:Wait()
+            completed:Destroy()
+            if not alive then
+                if result[1] and type(result[2])=="table" then
+                    for _,object in ipairs(result[2])do object:Destroy()end
+                end
+                error("Menu was closed during asset decoding.")
+            end
+            if not result[1]then error(result[2],0)end
+            return result[2]
+        end
+        local native=function()
+            checkpoint("native_decode")
+            local objects=decodeAsset("rbxassetid://"..string.format("%.0f",path))
+            checkpoint("ready")
+            return objects
+        end
+        local requestAsset=request or http_request or (syn and syn.request)
+        if catalog and (type(requestAsset)~="function" or type(writefile)~="function" or type(customAsset)~="function")then
+            return native()
+        end
+        if not catalog then assert(type(writefile)=="function" and type(customAsset)=="function",
+            "This executor cannot load Dominus Azurelight's visual effects locally.") end
+        local bytes
+        if catalog then
+            local localOk,localObjects=pcall(function()
+                -- Remote GetObjects blocks rendering on some executors. Download
+                -- with the yielding request API, then let Roblox decode locally.
+                checkpoint("download")
+                local response=assetCall("asset.httpRequest",function()
+                    return requestAsset({Url="https://assetdelivery.roblox.com/v1/asset/?id="..string.format("%.0f",path),Method="GET"})
+                end)
+                logDiagnostic("asset_http_response",{asset=tostring(path),status=response and tonumber(response.StatusCode or response.Status),bytes=response and type(response.Body)=="string" and #response.Body or 0},true)
+                assert(alive,"Menu was closed during asset download.")
+                assert(response and tonumber(response.StatusCode or response.Status)==200,"Catalog asset download failed.")
+                bytes=response.Body
+                assert(type(bytes)=="string" and #bytes<=64*1024*1024,"Invalid catalog asset response.")
+                assetSerial=assetSerial+1
+                local file="larpblox-avatar-asset-"..assetSession.."-"..assetSerial..".rbxm"
+                local wrote,writeError=pcall(function()return assetCall("asset.writeFile",function()return writefile(file,bytes)end)end)
+                local assetOk,assetUri=false,nil
+                local loaded,objects=false,nil
+                if wrote then
+                    assetOk,assetUri=pcall(function()return assetCall("asset.registerFile",function()return customAsset(file)end)end)
+                    if assetOk and assetUri then
+                        checkpoint("local_decode")
+                        loaded,objects=pcall(function()return decodeAsset(assetUri)end)
+                    end
+                end
+                if type(delfile)=="function"then pcall(delfile,file)end
+                assert(wrote and assetOk and assetUri and loaded and type(objects)=="table" and #objects>0,writeError or "Local catalog asset decoding failed.")
+                return objects
+            end)
+            if localOk then checkpoint("ready");return localObjects end
+            logDiagnostic("asset_local_load_failed",{asset=tostring(path),error=tostring(localObjects)},true)
+            assert(alive,"Menu was closed during asset preparation.")
+            return native()
+        else
+            bytes=readSource(path,sha)
+            assert(bytes:sub(1,8)=="<roblox!","Invalid Dominus Azurelight visual asset.")
+        end
+        assetSerial=assetSerial+1
+        local file="larpblox-avatar-asset-"..assetSession.."-"..assetSerial..".rbxm"
+        local wrote,writeError=pcall(function()return assetCall("asset.writeFile",function()return writefile(file,bytes)end)end)
         assert(wrote,writeError)
-        local assetOk,assetUri=pcall(customAsset,file)
-        assert(assetOk and assetUri,"This executor could not prepare Dominus Azurelight's visual asset.")
-        local loaded,objects=pcall(function()return game:GetObjects(assetUri)end)
-        assert(loaded and type(objects)=="table" and #objects>0,"This executor could not load Dominus Azurelight's visual asset.")
+        local assetOk,assetUri=pcall(function()return assetCall("asset.registerFile",function()return customAsset(file)end)end)
+        local loaded,objects=false,nil
+        if assetOk and assetUri then loaded,objects=pcall(function()return decodeAsset(assetUri)end)end
+        if type(delfile)=="function"then pcall(delfile,file)end
+        assert(assetOk and assetUri,"This executor could not prepare the avatar asset.")
+        assert(loaded and type(objects)=="table" and #objects>0,"This executor could not load the avatar asset.")
         return objects
     end
+    local function readAsset(path)
+        assert(alive,"Menu was closed before loading asset.")
+        if diagnostics and diagnostics.run then
+            return diagnostics.run("avatar.readAsset",{asset=tostring(path),generation=loadGeneration},readAssetInner,path)
+        end
+        return readAssetInner(path)
+    end
+    avatarAssetReader=readAsset
     local function createAvatar(player,onStatus,assetReader,managedRespawn)
-        return create(player,onStatus,assetReader or readAsset,managedRespawn)
+        return create(player,onStatus,assetReader or readAsset,managedRespawn,diagnostics)
     end
     avatarFactory=createAvatar
     avatarAPI=create(Players.LocalPlayer,function(message,working)
@@ -522,15 +678,15 @@ local function api()
         trace("Avatar: "..message)
         busy=working or actionRunning;statusText=message
         if render then render() end
-    end,readAsset,true)
+    end,readAsset,true,diagnostics)
     return avatarAPI
 end
 local function atmosphere()
-    if atmosphereAPI then return atmosphereAPI end
+    if moduleRuntime.atmosphereAPI then return moduleRuntime.atmosphereAPI end
     local source=readSource("atmosphere.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
-    atmosphereAPI=chunk()(game,lightingSchema)
-    return atmosphereAPI
+    moduleRuntime.atmosphereAPI=chunk()(game,lightingSchema)
+    return moduleRuntime.atmosphereAPI
 end
 local function motion()
     if motionAPI then return motionAPI end
@@ -555,7 +711,7 @@ local function animations()
         if not alive then return end
         statusText=message
         if view then view.setStatus(message) end
-    end,true)
+    end,true,avatarAssetReader)
     return animationAPI
 end
 local function clothes()
@@ -569,16 +725,16 @@ local function clothes()
         trace("Clothing: "..message)
         statusText=message
         if view then view.setStatus(message) end
-    end,true)
+    end,true,avatarAssetReader)
     return clothesAPI
 end
 local function localNames()
-    if localNamesAPI then return localNamesAPI end
+    if moduleRuntime.localNamesAPI then return moduleRuntime.localNamesAPI end
     local source=readSource("local_names.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
     nameFactory=chunk()
-    localNamesAPI=nameFactory(Players.LocalPlayer,playerGui)
-    return localNamesAPI
+    moduleRuntime.localNamesAPI=nameFactory(Players.LocalPlayer,playerGui)
+    return moduleRuntime.localNamesAPI
 end
 local gameBrowserSync
 local function presentationFactories()
@@ -636,14 +792,17 @@ local function sharedLarp()
     local create=chunk();assert(type(create)=="function","Shared Larp sync failed to load.")
     sharedLarpAPI=create(Players.LocalPlayer,function()return gameBrowserSync().snapshotForSharing()end,function()return localNames().getSettings()end,
         function(player,onStatus)return avatarFactory(player,onStatus,nil,true)end,
-        function(player,onStatus)return clothesFactory(player,onStatus,true)end,
-        function(player,onStatus)return animationFactory(player,onStatus,true)end,
+        function(player,onStatus)return clothesFactory(player,onStatus,true,avatarAssetReader)end,
+        function(player,onStatus)return animationFactory(player,onStatus,true,avatarAssetReader)end,
         function(player,gui)return nameFactory(player,gui)end,
         function()return alive end,function(message)
             if not alive then return end
             statusText=message
             if view then view.setStatus(message) end
-        end,{onAppearanceApplied=function(userId)corpseController().refresh(tonumber(userId))end,log=logDiagnostic,getImageUrl=function()return gameBrowserSync().sharedImageUrl()end,createViews=peerViews,transport=gameBrowserSync(),
+            end,{describeSnapshot=sharedInspection().description,onAppearanceApplied=function(userId)corpseController().refresh(tonumber(userId))end,log=logDiagnostic,getImageUrl=function()return gameBrowserSync().sharedImageUrl()end,createViews=peerViews,transport=gameBrowserSync(),
+            createHatScripts=accessoryRuntime.forPeer,getHatScripts=function()return accessoryRuntime.channel().snapshot()end,
+            validHatScripts=function(value)return accessoryRuntime.channel().valid(value)end,
+            onHatScriptsChanged=accessoryRuntime.channel().onChanged,
             fetchProfiles=function(ids)
                 if not fetchSharedProfiles then
                     local chunk,message=loadstring(readSource("shared_profiles.lua",moduleRevision));assert(chunk,message)
@@ -662,7 +821,7 @@ local function previews()
     return previewsAPI
 end
 local function nativeViews()
-    if nativeViewsAPI then return nativeViewsAPI end
+    if moduleRuntime.nativeViewsAPI then return moduleRuntime.nativeViewsAPI end
     api()
     presentationFactories()
     local portraits=portraitFactory.create(Players.LocalPlayer,function()
@@ -671,15 +830,15 @@ local function nativeViews()
     local inspection=sharedInspection().forPlayer(Players.LocalPlayer,function()
         return previews()
     end)
-    nativeViewsAPI={}
-    function nativeViewsAPI.update(options)
+    moduleRuntime.nativeViewsAPI={}
+    function moduleRuntime.nativeViewsAPI.update(options)
         portraits.update(options);inspection.update(options)
     end
-    function nativeViewsAPI.destroy()
+    function moduleRuntime.nativeViewsAPI.destroy()
         portraits.destroy();inspection.destroy()
         if inspectionRouter then inspectionRouter.destroy();inspectionRouter=nil end
     end
-    return nativeViewsAPI
+    return moduleRuntime.nativeViewsAPI
 end
 gameBrowserSync=function()
     if gameBrowserSyncAPI then return gameBrowserSyncAPI end
@@ -698,6 +857,8 @@ gameBrowserSync=function()
     gameBrowserSyncAPI=select(1,create(Players.LocalPlayer,function()return api()end,function()return clothes()end,function()return alive end,function(message)
         if alive then trace("Browser: "..message);statusText=message;if view then view.setStatus(message) end end
     end,function()return animations()end,function()return names end,nativeViews,{
+        describeSnapshot=function(snapshot)return sharedInspection().description(snapshot)end,
+        log=logDiagnostic,
         isReady=function()return startupComplete end,
         lookupAvatar=accountAvatar,
         clientRequest=function(method,params)
@@ -726,12 +887,22 @@ gameBrowserSync=function()
             elseif sharedLarpAPI then sharedLarpAPI.setEnabled(false)end
         end,
     }))
-    gameBrowserSyncAPI.onSnapshot(function()corpseController().refresh()end)
+    gameBrowserSyncAPI.onSnapshot(function()
+        corpseController().refresh()
+        if accessoryRuntime.turret then accessoryRuntime.turret.setEnabled(gameBrowserSyncAPI.isLarpEnabled()) end
+        if accessoryRuntime.doombringer then accessoryRuntime.doombringer.setEnabled(gameBrowserSyncAPI.isLarpEnabled()) end
+        if accessoryRuntime.crown then accessoryRuntime.crown.setEnabled(gameBrowserSyncAPI.isLarpEnabled()) end
+        if accessoryRuntime.contest then accessoryRuntime.contest.setEnabled(gameBrowserSyncAPI.isLarpEnabled()) end
+    end)
     corpseController().refresh()
     return gameBrowserSyncAPI
 end
 local function reapplyAll(editor,expectedCharacter)
     assert(not expectedCharacter or Players.LocalPlayer.Character==expectedCharacter,"Your character changed while preparing the avatar.")
+    if gameBrowserSyncAPI and gameBrowserSyncAPI.prepareSavedAppearance then
+        local warmed,reason=pcall(gameBrowserSyncAPI.prepareSavedAppearance)
+        if not warmed then logDiagnostic("local_native_source_failed",{detail=tostring(reason)})end
+    end
     local failures={}
     for _,step in ipairs({
         {"avatar",function() if editor.prepareSaved then editor.prepareSaved()end;return editor.reapplySaved() end},
@@ -769,11 +940,11 @@ local function action(callback,independent)
     end)
 end
 local function persistLighting()
-    if atmosphereAPI then
-        local configuration=atmosphereAPI.configuration()
+    if moduleRuntime.atmosphereAPI then
+        local configuration=moduleRuntime.atmosphereAPI.configuration()
         -- Retain legacy presets until the user changes a direct editor control.
-        local legacy=atmosphereAPI.environment()
-        if legacy then configuration={version=1,asset=atmosphereAPI.currentAsset()or "",daylight=atmosphereAPI.daylightEnabled(),environment=legacy}end
+        local legacy=moduleRuntime.atmosphereAPI.environment()
+        if legacy then configuration={version=1,asset=moduleRuntime.atmosphereAPI.currentAsset()or "",daylight=moduleRuntime.atmosphereAPI.daylightEnabled(),environment=legacy}end
         playerGui:SetAttribute("HoneyBunCosmeticUI_activeAtmosphere",game:GetService("HttpService"):JSONEncode(configuration))
     end
 end
@@ -790,60 +961,60 @@ local function reapplyAtmosphere()
     if saved.asset~=""then local ok,message=active.apply(saved.asset);assert(ok,message)end
 end
 local function hatSounds()
-    if accessorySoundsAPI then return accessorySoundsAPI end
+    if accessoryRuntime.sounds then return accessoryRuntime.sounds end
     api()
     local source=readSource("accessory_sounds.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
-    accessorySoundsAPI=chunk()(Players.LocalPlayer,playerGui)
-    return accessorySoundsAPI
+    accessoryRuntime.sounds=chunk()(Players.LocalPlayer,playerGui)
+    return accessoryRuntime.sounds
 end
 local function customCrosshair()
     assert(isMM2,"Custom sheriff crosshairs are available in MM2.")
-    if crosshairAPI then return crosshairAPI end
+    if moduleRuntime.crosshairAPI then return moduleRuntime.crosshairAPI end
     local source=readSource("crosshair.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
-    crosshairAPI=chunk()(game)
-    crosshairAPI.setSize(crosshairSize)
-    return crosshairAPI
+    moduleRuntime.crosshairAPI=chunk()(game)
+    moduleRuntime.crosshairAPI.setSize(crosshairSize)
+    return moduleRuntime.crosshairAPI
 end
 local function mm2()
     assert(isMM2,"This menu is only available in MM2.")
-    if mm2API then return mm2API end
+    if moduleRuntime.mm2API then return moduleRuntime.mm2API end
     api()
     local librarySource=readSource("gun_library.lua", moduleRevision)
     local libraryChunk,libraryError=loadstring(librarySource);assert(libraryChunk,libraryError)
-    mm2GunLibraryAPI=libraryChunk()(game,playerGui)
+    moduleRuntime.mm2GunLibraryAPI=libraryChunk()(game,playerGui)
     local source=readSource("mm2.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
     assert(alive,"Larpblox was refreshed; the older weapon controller was cancelled.")
-    mm2API=chunk()(game,nil,mm2GunLibraryAPI)
-    mm2API.setKnifeSide(knifeSide)
-    return mm2API
+    moduleRuntime.mm2API=chunk()(game,nil,moduleRuntime.mm2GunLibraryAPI)
+    moduleRuntime.mm2API.setKnifeSide(knifeSide)
+    return moduleRuntime.mm2API
 end
 local function nativeMM2()
-    if mm2NativeAPI then return mm2NativeAPI end
+    if moduleRuntime.mm2NativeAPI then return moduleRuntime.mm2NativeAPI end
     local catalog=mm2()
     local source=readSource("native_inventory.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
     assert(alive,"Larpblox was refreshed; the older weapon controller was cancelled.")
-    mm2NativeAPI=chunk()(playerGui,catalog,function(message)
+    moduleRuntime.mm2NativeAPI=chunk()(playerGui,catalog,function(message)
         if not alive then return end
         statusText=message
         if view then view.setStatus(message) end
     end)
-    return mm2NativeAPI
+    return moduleRuntime.mm2NativeAPI
 end
 local function savedNativeMM2()
-    if mm2SavedNativeAPI then return mm2SavedNativeAPI end
+    if moduleRuntime.mm2SavedNativeAPI then return moduleRuntime.mm2SavedNativeAPI end
     local backend=mm2()
     local source=readSource("native_inventory.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
     assert(alive,"Larpblox was refreshed; the older weapon controller was cancelled.")
     local function openWeaponEditor(entry,mode)
-        if not mm2WeaponEditorAPI then
+        if not moduleRuntime.mm2WeaponEditorAPI then
             local editorSource=readSource("weapon_editor.lua", moduleRevision)
             local editorChunk,editorError=loadstring(editorSource);assert(editorChunk,editorError)
-            mm2WeaponEditorAPI=editorChunk()(playerGui,{
+            moduleRuntime.mm2WeaponEditorAPI=editorChunk()(playerGui,{
                 getEditorScene=backend.getWeaponEditorScene,
                 setWeaponAdjustment=backend.setSavedWeaponAdjustment
             },function(message)if alive then statusText=message;view.setStatus(message) end end)
@@ -851,57 +1022,57 @@ local function savedNativeMM2()
         for _,saved in ipairs(backend.savedInventory(entry.kind)) do
             if saved.id==entry.id then entry=saved;break end
         end
-        mm2WeaponEditorAPI.open(entry,mode)
+        moduleRuntime.mm2WeaponEditorAPI.open(entry,mode)
     end
     local savedCatalog={list=backend.savedInventory,equip=backend.equip,getEquipped=backend.getEquipped,remove=backend.removeSavedWeapon,rename=backend.renameSavedWeapon,openEditor=openWeaponEditor}
-    mm2SavedNativeAPI=chunk()(playerGui,savedCatalog,function(message)
+    moduleRuntime.mm2SavedNativeAPI=chunk()(playerGui,savedCatalog,function(message)
         if alive then statusText=message;view.setStatus(message) end
     end,"saved")
-    return mm2SavedNativeAPI
+    return moduleRuntime.mm2SavedNativeAPI
 end
 local function effectsMM2()
     assert(isMM2,"This menu is only available in MM2.")
-    if mm2EffectsAPI then return mm2EffectsAPI end
+    if moduleRuntime.mm2EffectsAPI then return moduleRuntime.mm2EffectsAPI end
     api()
     local source=readSource("mm2_effects.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
     local librarySource=readSource("effect_library.lua", moduleRevision)
     local libraryChunk,libraryError=loadstring(librarySource);assert(libraryChunk,libraryError)
-    mm2EffectsLibraryAPI=libraryChunk()(game,playerGui)
-    mm2EffectsAPI=chunk()(game,function(message)
+    moduleRuntime.mm2EffectsLibraryAPI=libraryChunk()(game,playerGui)
+    moduleRuntime.mm2EffectsAPI=chunk()(game,function(message)
         if alive then statusText=message;if view then view.setStatus(message) end end
-    end,mm2EffectsLibraryAPI)
-    return mm2EffectsAPI
+    end,moduleRuntime.mm2EffectsLibraryAPI)
+    return moduleRuntime.mm2EffectsAPI
 end
 local function nativeEffectsMM2()
-    if mm2EffectsNativeAPI then return mm2EffectsNativeAPI end
+    if moduleRuntime.mm2EffectsNativeAPI then return moduleRuntime.mm2EffectsNativeAPI end
     local catalog=effectsMM2()
     local source=readSource("native_inventory.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
-    mm2EffectsNativeAPI=chunk()(playerGui,catalog,function(message)
+    moduleRuntime.mm2EffectsNativeAPI=chunk()(playerGui,catalog,function(message)
         if alive then statusText=message;if view then view.setStatus(message) end end
     end,"saved-effects")
-    return mm2EffectsNativeAPI
+    return moduleRuntime.mm2EffectsNativeAPI
 end
 local function emoteBarMM2()
-    if mm2EmoteBarAPI then return mm2EmoteBarAPI end
+    if moduleRuntime.mm2EmoteBarAPI then return moduleRuntime.mm2EmoteBarAPI end
     local source=readSource("emote_bar.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
     local backend=mm2()
-    mm2EmoteBarAPI=chunk()(playerGui,{list=backend.list,preview=backend.preview},function(message)
+    moduleRuntime.mm2EmoteBarAPI=chunk()(playerGui,{list=backend.list,preview=backend.preview},function(message)
         if alive then statusText=message;if view then view.setStatus(message) end end
     end,game)
-    return mm2EmoteBarAPI
+    return moduleRuntime.mm2EmoteBarAPI
 end
 local function nativeEmotesMM2()
-    if mm2EmotesNativeAPI then return mm2EmotesNativeAPI end
+    if moduleRuntime.mm2EmotesNativeAPI then return moduleRuntime.mm2EmotesNativeAPI end
     local source=readSource("native_inventory.lua", moduleRevision)
     local chunk,message=loadstring(source);assert(chunk,message)
     local backend=mm2()
-    mm2EmotesNativeAPI=chunk()(playerGui,{list=backend.list,preview=backend.preview},function(message)
+    moduleRuntime.mm2EmotesNativeAPI=chunk()(playerGui,{list=backend.list,preview=backend.preview},function(message)
         if alive then statusText=message;if view then view.setStatus(message) end end
     end,"emotes")
-    return mm2EmotesNativeAPI
+    return moduleRuntime.mm2EmotesNativeAPI
 end
 local function enableMM2Emotes()
     local ok,message=nativeEmotesMM2().enable()
@@ -1017,7 +1188,7 @@ gamePageProps.MM2=function()
             return "Saved effects refreshed."
         end
         local function invoke(callback)return function(...)local arguments=table.pack(...);action(function()return callback(table.unpack(arguments,1,arguments.n))end,true)end end
-        local saved=mm2API and mm2API.savedInventory()or {}
+        local saved=moduleRuntime.mm2API and moduleRuntime.mm2API.savedInventory()or {}
         return {
             loadSaved=function()return mm2().savedInventory()end,
             busy=busy,player=copyPlayerInput,saved=saved,crosshair=crosshairImage,crosshairSize=crosshairSize,knifeSide=knifeSide,allWeapons=mm2Enabled,emotes=mm2EmotesShown,persist=saveUI,
@@ -1029,7 +1200,7 @@ gamePageProps.MM2=function()
                     if kinds[kind]then
                         local ok,message=pcall(function()
                             if kind~="Effect"then local result=mm2().collectPlayerWeapon(username,kind);updateWeapons();return result end
-                            effectsMM2();local result,ids=mm2EffectsLibraryAPI.capturePlayer(username);mm2EffectsAPI.reloadLibrary()
+                            effectsMM2();local result,ids=moduleRuntime.mm2EffectsLibraryAPI.capturePlayer(username);moduleRuntime.mm2EffectsAPI.reloadLibrary()
                             if ids and ids[1]then result=result.." "..mm2EffectsAPI.equip(ids[1],"Effect")end
                             nativeEffectsMM2().enable();nativeEffectsMM2().refreshSaved();return result
                         end)
@@ -1081,14 +1252,14 @@ gamePageProps.MM2=function()
                 local ok=pcall(function()customCrosshair().setSize(value)end)
                 if ok then crosshairSize=value end;return ok
             end,
-            resetCrosshair=invoke(function()if crosshairAPI then crosshairAPI.set("")end;crosshairImage="";saveUI();return "Default crosshair restored."end),
+            resetCrosshair=invoke(function()if moduleRuntime.crosshairAPI then moduleRuntime.crosshairAPI.set("")end;crosshairImage="";saveUI();return "Default crosshair restored."end),
             setKnifeSide=invoke(function(value)local _,message=mm2().setKnifeSide(value);assert(message==nil,message);knifeSide=value;saveUI();return "Knife position updated."end),
             refreshWeapons=invoke(function()updateWeapons();return "Saved weapons refreshed."end),
             restoreWeapons=invoke(function()return mm2().restore()end),
             identify=invoke(function(name,kind)local message=mm2().identifySavedWeapon(name,kind);updateWeapons();return message end),
             toggleEmotes=invoke(function(enabled)
                 if enabled then enableMM2Emotes()
-                else nativeEmotesMM2().disable();if mm2EmoteBarAPI then mm2EmoteBarAPI.disable()end;mm2().stopEmote()end
+                else nativeEmotesMM2().disable();if moduleRuntime.mm2EmoteBarAPI then moduleRuntime.mm2EmoteBarAPI.disable()end;mm2().stopEmote()end
                 mm2EmotesShown=enabled;saveUI();return "MM2 emotes updated."
             end),
             toggleWeapons=invoke(function(enabled)
@@ -1098,17 +1269,17 @@ gamePageProps.MM2=function()
             end),
             refreshEffects=invoke(refreshEffects),
             collectEffects=invoke(function(username)
-                effectsMM2();local result=mm2EffectsLibraryAPI.captureServer(username);mm2EffectsAPI.reloadLibrary();nativeEffectsMM2().enable();nativeEffectsMM2().refreshSaved();return result
+                effectsMM2();local result=moduleRuntime.mm2EffectsLibraryAPI.captureServer(username);moduleRuntime.mm2EffectsAPI.reloadLibrary();nativeEffectsMM2().enable();nativeEffectsMM2().refreshSaved();return result
             end),
             stopEmote=invoke(function()return mm2().stopEmote()end),
             report=invoke(function()
                 local report=mm2().report().."\n"..nativeMM2().report()
-                if mm2SavedNativeAPI then report=report.."\n"..mm2SavedNativeAPI.report() end
-                if mm2EffectsAPI then report=report.."\n"..mm2EffectsAPI.report() end
-                if mm2EffectsLibraryAPI then report=report.."\n"..mm2EffectsLibraryAPI.report() end
-                if mm2EmotesNativeAPI then report=report.."\n"..mm2EmotesNativeAPI.report() end
-                if mm2EmoteBarAPI then report=report.."\n"..mm2EmoteBarAPI.report() end
-                if mm2EffectsNativeAPI then report=report.."\n"..mm2EffectsNativeAPI.report() end
+                if moduleRuntime.mm2SavedNativeAPI then report=report.."\n"..mm2SavedNativeAPI.report() end
+                if moduleRuntime.mm2EffectsAPI then report=report.."\n"..mm2EffectsAPI.report() end
+                if moduleRuntime.mm2EffectsLibraryAPI then report=report.."\n"..mm2EffectsLibraryAPI.report() end
+                if moduleRuntime.mm2EmotesNativeAPI then report=report.."\n"..mm2EmotesNativeAPI.report() end
+                if moduleRuntime.mm2EmoteBarAPI then report=report.."\n"..mm2EmoteBarAPI.report() end
+                if moduleRuntime.mm2EffectsNativeAPI then report=report.."\n"..mm2EffectsNativeAPI.report() end
                 if type(setclipboard)=="function" then
                     setclipboard(report)
                     return "MM2 report copied. Paste it into chat if a preview cannot load."
@@ -1148,6 +1319,14 @@ render=function()
             capturingOpeningKey=not capturingOpeningKey;render()
         end})
         button("Hide on start: "..(hideOnStart and "On" or "Off"),function()hideOnStart=not hideOnStart;saveUI();render()end,"HideOnStart")
+        button("No player collisions: "..(noPlayerCollisions and "On" or "Off"),function()
+            action(function()
+                local enabled=not noPlayerCollisions
+                playerCollisions().setEnabled(enabled)
+                noPlayerCollisions=enabled;saveUI()
+                return enabled and "Player collisions disabled locally." or "Normal player collisions restored."
+            end)
+        end,"NoPlayerCollisions")
         button("Reload interface",refreshMenu)
         button("Reapply cosmetics",function()action(reapplyAll)end)
         caption("Emotes",28,{size=18,color=theme.ink})
@@ -1391,28 +1570,35 @@ end)
 
 gui.Destroying:Connect(function()
     alive=false
+    logDiagnostic("interface_destroying",{generation=loadGeneration},true)
     if diagnostics then diagnostics.close()end
     pcall(view.destroy)
     connection:Disconnect()
     for object,tween in pairs(tweens) do tween:Cancel();tweens[object]=nil end
     respawn:Disconnect();clearReadiness();actionFinished:Destroy()
-    if atmosphereAPI then pcall(atmosphereAPI.destroy) end
-    if mm2EmoteBarAPI then pcall(mm2EmoteBarAPI.destroy) end
-    if mm2EmotesNativeAPI then pcall(mm2EmotesNativeAPI.destroy) end
-    if mm2EffectsNativeAPI then pcall(mm2EffectsNativeAPI.destroy) end
-    if mm2EffectsAPI then pcall(mm2EffectsAPI.destroy) end
-    if mm2EffectsLibraryAPI then pcall(mm2EffectsLibraryAPI.destroy) end
-    if mm2WeaponEditorAPI then pcall(mm2WeaponEditorAPI.destroy) end
-    if mm2SavedNativeAPI then pcall(mm2SavedNativeAPI.destroy) end
-    if mm2NativeAPI then pcall(mm2NativeAPI.destroy) end
-    if mm2API then pcall(mm2API.destroy) end
-    if crosshairAPI then pcall(crosshairAPI.destroy) end
-    if accessorySoundsAPI then pcall(accessorySoundsAPI.destroy) end
+    if moduleRuntime.atmosphereAPI then pcall(moduleRuntime.atmosphereAPI.destroy) end
+    if moduleRuntime.mm2EmoteBarAPI then pcall(moduleRuntime.mm2EmoteBarAPI.destroy) end
+    if moduleRuntime.mm2EmotesNativeAPI then pcall(moduleRuntime.mm2EmotesNativeAPI.destroy) end
+    if moduleRuntime.mm2EffectsNativeAPI then pcall(moduleRuntime.mm2EffectsNativeAPI.destroy) end
+    if moduleRuntime.mm2EffectsAPI then pcall(moduleRuntime.mm2EffectsAPI.destroy) end
+    if moduleRuntime.mm2EffectsLibraryAPI then pcall(moduleRuntime.mm2EffectsLibraryAPI.destroy) end
+    if moduleRuntime.mm2WeaponEditorAPI then pcall(moduleRuntime.mm2WeaponEditorAPI.destroy) end
+    if moduleRuntime.mm2SavedNativeAPI then pcall(moduleRuntime.mm2SavedNativeAPI.destroy) end
+    if moduleRuntime.mm2NativeAPI then pcall(moduleRuntime.mm2NativeAPI.destroy) end
+    if moduleRuntime.mm2API then pcall(moduleRuntime.mm2API.destroy) end
+    if moduleRuntime.crosshairAPI then pcall(moduleRuntime.crosshairAPI.destroy) end
+    if accessoryRuntime.sounds then pcall(accessoryRuntime.sounds.destroy) end
+    if accessoryRuntime.turret then pcall(accessoryRuntime.turret.destroy) end
+    if accessoryRuntime.doombringer then pcall(accessoryRuntime.doombringer.destroy) end
+    if accessoryRuntime.crown then pcall(accessoryRuntime.crown.destroy) end
+    if accessoryRuntime.contest then pcall(accessoryRuntime.contest.destroy) end
+    if accessoryRuntime.sharing then pcall(accessoryRuntime.sharing.destroy)end
     if corpseAPI then pcall(corpseAPI.destroy) end
     if sharedLarpAPI then pcall(sharedLarpAPI.destroy) end
     if gameBrowserSyncAPI then pcall(gameBrowserSyncAPI.destroy) end
-    if nativeViewsAPI then pcall(nativeViewsAPI.destroy) end
-    if localNamesAPI then pcall(localNamesAPI.destroy) end
+    if moduleRuntime.nativeViewsAPI then pcall(moduleRuntime.nativeViewsAPI.destroy) end
+    if moduleRuntime.localNamesAPI then pcall(moduleRuntime.localNamesAPI.destroy) end
+    if moduleRuntime.playerCollisionsAPI then pcall(moduleRuntime.playerCollisionsAPI.destroy) end
     if persistence then pcall(persistence.destroy) end
     if avatarAPI then pcall(avatarAPI.destroy) end
     if motionAPI then pcall(motionAPI.destroy) end
@@ -1430,7 +1616,10 @@ if not mounted then
     error("Larpblox UI could not mount: "..tostring(renderError),0)
 end
 trace("Replacing previous menu")
-for _,old in ipairs(previousMenus) do old:Destroy() end
+-- Keep this cleanup index-based: the loader's top-level scope is close to
+-- Luau's 200-register limit, and a transient loop local here can make the
+-- whole chunk fail to compile on current clients.
+while #previousMenus>0 do table.remove(previousMenus):Destroy() end
 gui.Name="HoneyBunCosmeticHub"
 trace("Showing menu")
 panelScale.Scale=0.975
@@ -1438,6 +1627,13 @@ panel.GroupTransparency=1
 panel.Position=UDim2.new(1,-12,0.5,0)
 showMenu(not hideOnStart)
 trace("Menu rendered; starting saved cosmetics")
+if noPlayerCollisions then
+    local ok,message=pcall(function()playerCollisions().setEnabled(true)end)
+    if not ok then
+        noPlayerCollisions=false;saveUI()
+        warn("Larpblox: player collisions could not load: "..tostring(message))
+    end
+end
 -- Connect before asset restoration so peer identity is available immediately.
 -- The bridge defers changes to our own body until restoration has completed.
 trace("Starting browser connection")
@@ -1453,6 +1649,15 @@ action(function()
     local editor=api()
     trace("Restoring accessory sounds")
     local soundsLoaded=pcall(hatSounds)
+    for _,entry in ipairs({{"turret","teapot_turret.lua","Teapot Turret"},{"doombringer","doombringer.lua","Doombringer"},{"crown","black_iron_crown.lua","Black Iron Crown"},{"contest","contest_award.lua","Contest Winner Award"}})do
+        local loaded,err=pcall(function()
+            accessoryRuntime[entry[1]]=accessoryRuntime.factory(entry[2])(Players.LocalPlayer,function(message)
+                if alive then statusText=message;if view then view.setStatus(message)end end
+            end,{emit=accessoryRuntime.channel().emit,changed=accessoryRuntime.channel().changed,viewerGui=playerGui})
+            accessoryRuntime[entry[1]].setEnabled(not gameBrowserSyncAPI or gameBrowserSyncAPI.isLarpEnabled())
+        end)
+        if not loaded then warn("Larpblox: "..entry[3].." could not load: "..tostring(err))end
+    end
     trace("Restoring saved cosmetics")
     local restored,message=pcall(reapplyAll,editor)
     if not restored then message="Could not prepare saved avatar: "..tostring(message)end

@@ -19,7 +19,7 @@ return function(userIds)
     for _,record in ipairs(data.players)do
         local snapshot=type(record)=="table" and record.snapshot
         if type(record)=="table" and wanted[record.userId] and type(snapshot)=="table" and type(snapshot.definition)=="table"
-            and type(snapshot.definition.assets)=="table" and #snapshot.definition.assets<=100 and type(snapshot.items)=="table" then
+            and type(snapshot.definition.assets)=="table" and #snapshot.definition.assets<=512 and type(snapshot.items)=="table" then
             local known={}
             for _,item in ipairs(snapshot.items)do if type(item)=="table" and id(item.id) then known[item.id]=item end end
             local valid=true

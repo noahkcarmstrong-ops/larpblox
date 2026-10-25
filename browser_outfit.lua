@@ -16,12 +16,12 @@ end
 return function(player,getAvatar,getClothes,onStatus,getAnimations)
     local api={}
     function api.import(raw)
-        assert(type(raw)=="string" and #raw>0 and #raw<=32768,"Paste the browser outfit JSON export first.")
+        assert(type(raw)=="string" and #raw>0 and #raw<=262144,"Paste the browser outfit JSON export first.")
         local outfit=HttpService:JSONDecode(raw)
         assert(type(outfit)=="table" and outfit.version==1
             and outfit.kind=="larpblox-cosmetic-outfit","That is not a supported Larpblox browser outfit export.")
         assert(tostring(outfit.userId)==tostring(player.UserId),"This browser outfit belongs to a different Roblox account.")
-        assert(type(outfit.items)=="table" and #outfit.items<=100,"A browser outfit can contain at most 100 component assets.")
+        assert(type(outfit.items)=="table" and #outfit.items<=512,"A browser outfit can contain at most 512 component assets.")
 
         for index,item in ipairs(outfit.items) do
             assert(type(item)=="table" and item.itemType=="Asset","Browser outfit item #"..index.." is invalid.")
@@ -40,7 +40,7 @@ return function(player,getAvatar,getClothes,onStatus,getAnimations)
             if assetType==19 then
                 ok,message=pcall(function() return getAvatar().equipGear(id) end)
             elseif accessoryTypes[assetType] then
-                ok,message=pcall(function() return getAvatar().equipAccessory(id) end)
+                ok,message=pcall(function() return getAvatar().equipAccessory(id,nil,assetType) end)
             elseif assetType==11 then
                 ok,message=pcall(function() return getClothes().equipShirt(id) end)
             elseif assetType==12 then

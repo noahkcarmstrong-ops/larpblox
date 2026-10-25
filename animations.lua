@@ -10,7 +10,7 @@ local function bundleId(value)
     assert(id and id>0 and id%1==0 and id<9007199254740992,"Paste a Roblox animation bundle link or bundle ID.")
     return id
 end
-return function(player,onStatus,managedRespawn)
+return function(player,onStatus,managedRespawn,readAsset)
     local gui=player:FindFirstChildOfClass("PlayerGui")
     local attribute="HoneyBunCosmeticAnimationBundle"
     local savedId=gui and gui:GetAttribute(attribute)
@@ -88,7 +88,10 @@ return function(player,onStatus,managedRespawn)
     local function extractAsset(id,default,ctx)
         local key=tostring(id)..":"..default
         if componentCache[key]then return componentCache[key]end
-        local loaded,roots=pcall(function() return game:GetObjects("rbxassetid://"..string.format("%.0f",id)) end)
+        local loaded,roots=pcall(function()
+            if readAsset then return readAsset(id)end
+            return game:GetObjects("rbxassetid://"..string.format("%.0f",id))
+        end)
         local extracted={}
         if loaded and type(roots)=="table" then
             for _,root in ipairs(roots) do

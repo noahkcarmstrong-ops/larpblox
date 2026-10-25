@@ -1,9 +1,12 @@
 -- Original accessory audio only; asset scripts are never executed.
-return function(player,gui)
+return function(player,gui,sharing)
+    sharing=sharing or {}
+    local remote=sharing.remote==true
     local KEY="HoneyBunCosmeticUI_HatSounds"
     local api,alive={},true
-    local enabled=gui:GetAttribute(KEY)~=false
+    local enabled=not remote and gui:GetAttribute(KEY)~=false
     local character,entries,connections=nil,{},{}
+    local preferenceConnection
     local laughs={['62777535']=true,['88108663']=true,['88108686']=true}
     local function read(o,k)local ok,v=pcall(function()return o[k]end);return ok and v or nil end
     local function is(o,c)local fn=read(o,"IsA");return fn and o:IsA(c)or false end
@@ -109,7 +112,11 @@ return function(player,gui)
     local respawn=player.CharacterAdded:Connect(function(c)if alive then bind(c)end end)
     function api.isEnabled()return enabled end
     function api.setEnabled(value)
-        enabled=value==true;gui:SetAttribute(KEY,enabled);scan()
+        local nextEnabled=value==true and (not remote or gui:GetAttribute(KEY)~=false)
+        if enabled==nextEnabled then return enabled and "Hat sounds enabled (only you hear them)."or "Hat sounds disabled." end
+        enabled=nextEnabled
+        if not remote then gui:SetAttribute(KEY,enabled)end
+        scan();if not remote and sharing.changed then pcall(sharing.changed,enabled)end
         return enabled and "Hat sounds enabled (only you hear them)."or "Hat sounds disabled."
     end
     function api.playNow()
@@ -125,7 +132,13 @@ return function(player,gui)
     end
     function api.destroy()
         if not alive then return end
-        alive=false;respawn:Disconnect();bind(nil)
+        alive=false;respawn:Disconnect();if preferenceConnection then preferenceConnection:Disconnect();preferenceConnection=nil end;bind(nil)
+    end
+    if remote and gui.GetAttributeChangedSignal then
+        preferenceConnection=gui:GetAttributeChangedSignal(KEY):Connect(function()
+            local nextEnabled=gui:GetAttribute(KEY)~=false
+            if enabled~=nextEnabled then enabled=nextEnabled;scan()end
+        end)
     end
     bind(player.Character)
     return api

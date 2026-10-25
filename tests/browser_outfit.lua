@@ -10,5 +10,10 @@ local importer=dofile("browser_outfit.lua")({UserId=7},function()return avatar e
 local message=importer.import("fixture")
 assert(not message:find("Unsupported:") and not message:find("Could not load:"),"supported imports have no failures")
 for _,assetType in ipairs(types)do assert(applied[1000+assetType],"import category dispatched: "..assetType)end
+selection.items={}
+for _,assetType in ipairs({8,41,42,43,44,45,46,47,64,65,66,67,68,69,70,71,72,76,77})do
+    for n=1,20 do selection.items[#selection.items+1]={id=assetType*100+n,name="Accessory",itemType="Asset",assetType=assetType}end
+end
+assert(not importer.import("fixture"):find("Could not load:"),"380 accessory snapshots import without a total100 cap")
 selection.userId=8;assert(not pcall(importer.import,"fixture"),"another account's import is rejected")
 print("Browser outfit import accessory, clothing, animation dispatch and account isolation passed.")

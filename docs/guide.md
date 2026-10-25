@@ -35,11 +35,32 @@ Names affect local overhead labels and accessible own-player rows, including the
 
 The added accessory list shows your count and a separate Remove button for each item. Successful entries clear from the input; any failed entries stay there to retry, with an explanation above the list.
 
-Supports compatible rigid accessories, including hats, masks, and hair. Added accessories appear in a remove list. **Remove added accessories** leaves your existing accessories alone. Asset scripts are stripped before anything is equipped. At most 20 added accessories are allowed at once.
+Supports compatible rigid accessories, including hats, masks, and hair. Added accessories appear in a remove list. **Remove added accessories** leaves your existing accessories alone. Asset scripts are stripped before anything is equipped. Up to 20 added accessories are allowed per accessory type, including hats, hair, and face accessories. Body parts and classic clothes do not use accessory slots.
 
 **Remove current Roblox accessories** hides the accessories your avatar is already wearing, including your account's hats. Accessories added by the hub stay equipped. **Restore original appearance** brings the original accessories back. Refresh re-applies your saved choice. This does not remove anything from your Roblox inventory.
 
+### Doombringer satellite
+
+Wear **Doombringer's Doombringer** (4640898) with Larp mode enabled. Its original satellite behavior is recreated as local visual effects:
+
+| Chat command | Effect |
+| --- | --- |
+| `smite Username` / `smite me` | Fire a satellite beam with a visible impact at a player. |
+| `target X Y Z` | Fire at coordinates. |
+| `movesat X Y Z` | Move the satellite. |
+| `location` | Show your coordinates in Larpblox's status. |
+| `giveweapon me` | Add a local targeting tool; equip it and click to fire. |
+| `kill Username` / `kill all` | Play cosmetic strikes without changing player health. |
+| `armageddon` | Fire 25 visible strikes around your character. |
+| `stop` / `...` | Cancel ongoing strikes. |
+
+Effects and the targeting tool are removed when the hat is unequipped, Larp mode is disabled, or your character respawns. These effects do not damage players or grant tools to other players.
+
 ### Hat sounds
+
+Wear Game Trailer Video Contest Winner (92719239) with Larp mode enabled to receive **Contest Winner Award** in your backpack. Equip it and click for the original applause sound and five seconds of gold sparkles. During those five seconds, touching small objects with the held award gives them a temporary local gold/ice appearance. Character parts are excluded; objects restore when the effect ends or the tool is unequipped. The original ready/busy cursor is restored while equipped, and your previous cursor returns afterward. Hat sounds settings and Roblox audio permissions apply.
+
+Black Iron Crown of Pwnage (1078202) reproduces its original `Hello John` console greeting once when worn with Larp mode enabled. Its obsolete `RenderHooksService:EnableAdorns(false)` call is omitted to preserve Roblox's native controls. This script has no visual effects or chat commands.
 
 Equipped accessories can play their embedded original sounds locally. Brighteyes' Witches Brew Hat uses its original three laughs and randomly plays one every 5–15 seconds while worn, matching its original SoundPlayer behavior. Hidden or removed hats stop hub-started playback. Roblox audio permissions still apply; arbitrary accessory scripts are not executed.
 

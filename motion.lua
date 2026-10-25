@@ -29,6 +29,15 @@ return function(player,onStatus,managedRespawn)
     local replaceOriginals=false
     local alive,generation=true,0
     local baseline,accountChecked=nil,false
+    local currentDescription
+    local function liveDescription(humanoid)
+        if currentDescription and currentDescription.Parent==humanoid then return currentDescription end
+        currentDescription=nil
+        for _,child in ipairs(humanoid:GetChildren())do
+            if child:IsA("HumanoidDescription")then currentDescription=child end
+        end
+        return currentDescription
+    end
     if gui then
         local ok,saved=pcall(function() return Http:JSONDecode(gui:GetAttribute(attribute) or "{}") end)
         if ok and type(saved)=="table" then
@@ -63,7 +72,7 @@ return function(player,onStatus,managedRespawn)
         local character,humanoid=context()
         assert(humanoid.RigType==Enum.HumanoidRigType.R15,"Roblox's emote wheel needs an R15 avatar.")
         -- CoreScripts observe this live child, not the copy from GetAppliedDescription().
-        local desc=humanoid:FindFirstChildOfClass("HumanoidDescription")
+        local desc=liveDescription(humanoid)
         assert(desc,"This avatar has no live emote description. Wait for it to load, then retry.")
         if not original or original.description~=desc then
             local emotes,equipped=desc:GetEmotes(),desc:GetEquippedEmotes()
@@ -430,7 +439,7 @@ return function(player,onStatus,managedRespawn)
             if not alive or (not next(slots) and not replaceOriginals)then return end
             local character=player.Character
             local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-            local desc=humanoid and humanoid:FindFirstChildOfClass("HumanoidDescription")
+            local desc=humanoid and liveDescription(humanoid)
             if not desc or humanoid.Health<=0 then return end
             local ok,reason=pcall(function()
                 local emotes,equipped=desc:GetEmotes(),{}
@@ -452,11 +461,17 @@ return function(player,onStatus,managedRespawn)
     local function watchWheel(character)
         for _,connection in ipairs(wheelConnections)do connection:Disconnect()end
         wheelConnections={}
+        currentDescription=nil
         if not character then return end
         local watched={}
         local function watch(instance)
             if watched[instance]then return end
             if instance:IsA("HumanoidDescription")then
+                -- CoreScripts rebind to the newly added description. During
+                -- replication the preceding description can still be present.
+                if instance.Parent and instance.Parent.Parent==character and instance.Parent:IsA("Humanoid")then
+                    currentDescription=instance
+                end
                 watched[instance]=true
                 wheelConnections[#wheelConnections+1]=instance.EmotesChanged:Connect(reconcileWheel)
                 wheelConnections[#wheelConnections+1]=instance.EquippedEmotesChanged:Connect(reconcileWheel)

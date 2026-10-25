@@ -28,7 +28,10 @@ game={Workspace=node("Workspace","Workspace"),GetService=function(_,name)if name
 local make=dofile("local_names.lua")
 local row=node("Frame","PlayerEntry_123");row.Parent=core;local label=node("TextLabel","Name");label.Text="OriginalUser";label.RichText=true;label.Parent=row
 local other=node("Frame","999");other.Parent=core;local otherLabel=node("TextLabel","Name");otherLabel.Text="OriginalUser";otherLabel.Parent=other
+local conflictingRank=node("TextLabel","Username");conflictingRank.Text="#3 - OriginalUser";conflictingRank:SetAttribute("UserId",999);conflictingRank.Parent=other
 local native=node("TextLabel","PlayerName");native.Text="Combined Service Name";native.Parent=row
+local rankedDisplay=node("TextLabel","DisplayName");rankedDisplay.Text="#2 - Original Display";rankedDisplay.Parent=row
+local rankedUsername=node("TextLabel","Username");rankedUsername.Text="#2 - OriginalUser";rankedUsername.Parent=row
 local shared=node("TextLabel","PlayerName");shared.Text="Original Display";shared.Parent=other
 local list=node("Frame","PlayerList");list.Parent=core
 local title=node("Frame","TitlePlayer");title.Parent=list
@@ -47,6 +50,8 @@ local richWeapons=node("TextLabel","Section");richWeapons.Text='<font color="#ff
 local otherWeapons=node("TextLabel","Section");otherWeapons.Text="OriginalUser's Weapons";otherWeapons.Parent=other
 local api=make(player,gui)
 api.set("Local_User","Local Display")
+assert(rankedDisplay.Text=="#2 - Local Display" and rankedUsername.Text=="#2 - Local_User","ranked leaderboard names replace only the semantic suffix")
+assert(conflictingRank.Text=="#3 - OriginalUser","conflicting ranked identity stays untouched")
 assert(profileName.Text=="Local_User (You)","own MM2 profile heading keeps You suffix and shows the Larp name")
 assert(weaponsName.Text=="Local_User's Weapons" and displayWeapons.Text=="Local Display's Weapons","own possessive section headings replace username and display name")
 assert(richWeapons.Text=='<font color="#fff">Local_User\'s</font> Weapons',"possessive replacement preserves RichText tags")

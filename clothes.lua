@@ -30,7 +30,7 @@ local function dispose(roots)
     for _,root in ipairs(roots or {}) do if root then root:Destroy() end end
 end
 
-return function(player,onStatus,managedRespawn)
+return function(player,onStatus,managedRespawn,readAsset)
     local gui=player:FindFirstChildOfClass("PlayerGui")
     local attribute="HoneyBunCosmeticClothes"
     local settings={}
@@ -71,7 +71,10 @@ return function(player,onStatus,managedRespawn)
         local property=({Shirt="ShirtTemplate",Pants="PantsTemplate",ShirtGraphic="Graphic"})[kind]
         local id=parse(value);local assetId=string.format("%.0f",id);local key=kind..":"..assetId;local template=templates[key]
         if not template then
-            local ok,roots=pcall(function() return game:GetObjects("rbxassetid://"..assetId) end)
+            local ok,roots=pcall(function()
+                if readAsset then return readAsset(id)end
+                return game:GetObjects("rbxassetid://"..assetId)
+            end)
             assert(ok and type(roots)=="table" and #roots>0,"Roblox could not load that catalog item. It may be private or unavailable.")
             if not valid(ctx) then dispose(roots);check(ctx) end
             local source
@@ -107,9 +110,21 @@ return function(player,onStatus,managedRespawn)
     end
     local function prepareOriginal(ctx,kind)
         if originals[kind]~=nil then return end
+        -- The live character can use a game-applied outfit whose clothing IDs
+        -- differ from the account description. Preserve that spawned baseline
+        -- so later package swaps still recognize and remap the native slots.
+        local current
+        if active then
+            for object,record in pairs(active.records)do
+                if record.kind==kind and not record.synthetic and object.Parent==active.character and record.source~="" then
+                    current=record.source;break
+                end
+            end
+        end
+        if current then originals[kind]=current;return end
         local id=accountId(ctx,kind)
-        assert(id~=nil,"Could not identify your original clothing; existing game clothing was preserved.")
-        originals[kind]=id==0 and "" or select(1,resolveTemplate(ctx,kind,id))
+        originals[kind]=id==nil and nil or (id==0 and "" or select(1,resolveTemplate(ctx,kind,id)))
+        assert(originals[kind]~=nil,"Could not identify your original clothing; existing game clothing was preserved.")
     end
     local function write(record,value)
         if record.object[record.property]==value then record.written=value;return end
@@ -215,6 +230,7 @@ return function(player,onStatus,managedRespawn)
             end
         end
         local view={character=character,records={},connections={},pending={}}
+        originals={}
         active=view;characters[character]=view
         view.connections[1]=character.ChildAdded:Connect(function(object)track(view,object,false)end)
         view.destroying=character.Destroying:Connect(function()closeView(view,false)end)

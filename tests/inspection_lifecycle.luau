@@ -1,4 +1,4 @@
--- Run in a Roblox client: loadstring(testSource)(nativeInspectionSource).
+-- Run in a Roblox client: loadstring(testSource)()(nativeInspectionSource).
 -- Detached real Instances exercise property signals and yielding renders without
 -- opening the user's inspector or requesting avatar assets.
 return function(source)
@@ -13,8 +13,13 @@ return function(source)
         local viewport=Instance.new("ViewportFrame");viewport.Size=UDim2.fromOffset(200,250);viewport.Parent=shell
         local gate,entered,finished=Instance.new("BindableEvent"),false,false
         local shows=0
-        local snapshot={version=1,definition={},items={}}
-        local gui={InspectPlayerFromHumanoidDescription=function(_,_,name)title.Text=name.."'s Avatar"end,
+        local requests,repairPending=0,false
+        local modernCard,modernLabel,modernImage
+        local snapshot={version=1,definition={},items={{id=123,name="Custom Hat"}}}
+        local gui={InspectPlayerFromHumanoidDescription=function(_,_,name)
+            requests=requests+1;title.Text=name.."'s Avatar"
+            if modernLabel then repairPending=true end
+        end,
             InspectPlayerFromUserId=function()end}
         local services={CoreGui=core,GuiService=gui,HttpService=game:GetService("HttpService")}
         local environment=setmetatable({game={GetService=function(_,name)return services[name]end}},{__index=getfenv()})
@@ -39,6 +44,56 @@ return function(source)
         local parent,image=overlay()
         assert(parent and parent.Enabled and image.Visible,"fixture inspector must be visible")
         local f={core=core,screen=screen,shell=shell,title=title,api=api,overlay=overlay,update=update}
+        function f.addModernCard()
+            local list=Instance.new("Frame");list.Name="List";list.Parent=shell
+            local card=Instance.new("Frame");card.Name="Item1";card.Parent=list
+            local image=Instance.new("ImageLabel");image.Image="rbxthumb://type=Asset&id=999&w=150&h=150";image.Parent=card
+            local label=Instance.new("TextLabel");label.Name="ItemCardFooterTitle";label.Text="Real Hat";label.Parent=card
+            modernCard,modernLabel,modernImage=card,label,image
+            settle();task.wait(0.25);return card,label,image
+        end
+        function f.repairModernCard()
+            assert(repairPending,"stale cards must request the custom description again")
+            repairPending=false
+            modernLabel.Text="Custom Hat";modernImage.Image="rbxthumb://type=Asset&id=123&w=150&h=150";settle();task.wait(0.25)
+            assert(modernCard.Visible,"matching custom cards must become visible")
+        end
+        function f.resetModernCard()
+            local before=requests
+            modernLabel.Text="Real Hat";modernImage.Image="rbxthumb://type=Asset&id=999&w=150&h=150";settle();task.wait(0.25)
+            assert(not modernCard.Visible,"a replaced real outfit must be quarantined")
+            assert(requests==before+1,"each stale reset must issue exactly one new description request")
+            f.repairModernCard()
+        end
+        function f.normalizedCard()
+            local card=Instance.new("Frame");card.Name="Item2";card.Parent=modernCard.Parent
+            local label=Instance.new("TextLabel");label.Name="ItemCardFooterTitle";label.Text="Normalized Dynamic Head";label.Parent=card
+            settle();task.wait(0.25)
+            local before=requests
+            for _=1,5 do update("rbxasset://textures/whiteCircle.png");settle()end
+            task.wait(0.25)
+            assert(requests==before,"a stable normalized catalog item must not cause an inspection loop")
+            card:Destroy();settle()
+        end
+        function f.progressiveModernCard()
+            local before=requests
+            local parent=f.overlay();local flickers=0
+            local listener=parent:GetPropertyChangedSignal("Enabled"):Connect(function()if not parent.Enabled then flickers=flickers+1 end end)
+            local card=Instance.new("Frame");card.Name="Item3";card.Parent=modernCard.Parent
+            local image=Instance.new("ImageLabel");image.Parent=card
+            local label=Instance.new("TextLabel");label.Name="ItemCardFooterTitle";label.Text="Loading item";label.Parent=card
+            for _,text in ipairs({"Loading item","Catalog item","Custom Hat"})do
+                label.Text=text;task.wait()
+            end
+            image.Image="rbxthumb://type=Asset&id=123&w=150&h=150";task.wait(0.3);settle()
+            listener:Disconnect()
+            assert(requests==before,"progressive modern card loading must not re-adopt before its matching catalog data arrives")
+            assert(flickers==0,"card loading must never hide an already-ready preview")
+            if repairPending then f.repairModernCard()end
+            local parent,overlay=f.overlay()
+            assert(parent and parent.Enabled and overlay.Visible,"progressive card loading must preserve the ready preview")
+            card:Destroy();settle()
+        end
         function f.hidden(message)
             local parent,image=overlay()
             assert(not parent or not parent.Enabled,message)
@@ -95,6 +150,17 @@ return function(source)
 
     f=fixture();f.shell.Visible=false;f.shell.Visible=true;f.api.destroy(true)
     settle();f.hidden("a deferred refresh must not recreate overlays after destroy")
+    f.destroy()
+
+    f=fixture()
+    local card,label,image=f.addModernCard()
+    assert(not card.Visible,"a late modern native card with a stale outfit is quarantined")
+    f.repairModernCard()
+    f.progressiveModernCard()
+    f.normalizedCard()
+    for _=1,5 do f.resetModernCard()end
+    f.shell.Visible=false;settle();f.shell.Visible=true;settle();settle()
+    assert(card.Visible,"reopening preserves the adopted modern item card")
     f.destroy()
     return "PASS: "..fixtureCount.." inspector fixtures cover hide, close, screen disable, unmount, destruction, player switching and render races"
 end
